@@ -7,6 +7,13 @@
   <a href="https://x.com/MiaAI_lab" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin:0 8px;vertical-align:middle;"><img src="https://img.shields.io/badge/Follow%20me%20on%20X-000000?style=for-the-badge&logo=x&logoColor=white" alt="Follow Mia on X" height="28" style="height:28px;width:auto;vertical-align:middle;border:0;" /></a>
 </p>
 
+> **NVIDIA's quantization-aware-distilled (QAD) FP4 checkpoint, close to bf16.** The default model is
+> [`nvidia/Qwen3.8-Flash-Next-FP4-Local`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local): NVIDIA trained the
+> NVFP4 and MXFP8 weights against the bf16 model as teacher, so the 4-bit weights are tuned to match it. On NVIDIA's own
+> numbers it scores 91.5% on GPQA Diamond and 88.7% on ToolEvalBench against 92.2% and 89.4% for bf16 (model card, not
+> measured here). The Zig engine support for this checkpoint is in progress in this branch; the measured tables further
+> down are for the INT4-AutoRound checkpoint (`CHECKPOINT=int4`) until the NVIDIA ones are re-measured.
+
 Serve **Qwen3.8 Flash Next** from a single NVIDIA DGX Spark (GB10, 128 GB) through an OpenAI-compatible API. It runs
 [TensorFold](https://github.com/ashhart/TensorFold)'s Zig engine, `tensorfold-native` (branch
 [`zig-flashnext`](https://github.com/ashhart/TensorFold/tree/zig-flashnext)), in NVIDIA's PyTorch container. One GPU,
@@ -19,7 +26,8 @@ recipe is ported from TensorFold's Python Flash Next engine, written by Ash Hart
 The Zig CUDA serving path and the CUDA family registry this recipe runs on were authored by Jürgen Schmied
 ([jschmied](https://github.com/jschmied)) in [TensorFold PR #443](https://github.com/ashhart/TensorFold/pull/443)
 (commit [`59e77e8`](https://github.com/ashhart/TensorFold/commit/59e77e8f4b875ce0e863a8c896fc8e424bc539ac)).
-[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) is by the Qwen team (Alibaba). The checkpoint is
+[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) is by the Qwen team (Alibaba). The default checkpoint is NVIDIA's
+[FP4 QAD export](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local) (Model Optimizer). The optional INT4 checkpoint is
 by azampatti ([azampatti](https://huggingface.co/azampatti)), who authored its top-5 expert cut, the shared-expert
 healing and the checkpoint,
 [`azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound`](https://huggingface.co/azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound);
@@ -52,93 +60,98 @@ before the Zig engine was by [Vontra](https://huggingface.co/Vontra),
 More in [Credits](#credits) and
 [`CREDITS.md`](CREDITS.md).
 
-INT4-AR uses 5 experts per token (4.8B active parameters) and scores about 10% lower general capability on its
-authors' own harness (46.6-47.6 against 51.8). Tool use is unchanged.
+The default checkpoint is NVIDIA's FP4 QAD export: routed experts in NVFP4 (group size 16, CSF-compressed scale factors),
+attention and shared-expert linears in MXFP8, the MTP experts and the vision tower quantized too (MXFP8 attention, W4A16
+NVFP4 MLP), an FP8 n-gram table, and all 512 routed experts with 10 per token (the INT4 cut keeps 5). The optional INT4-AutoRound checkpoint (`CHECKPOINT=int4`) uses 5 experts per token (4.8B active
+parameters) and scores about 10% lower general capability on its authors' own harness (46.6-47.6 against 51.8). Tool use
+is unchanged.
 
-- Checkpoint: [`azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound`](https://huggingface.co/azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound)
+- Checkpoint (default): [`nvidia/Qwen3.8-Flash-Next-FP4-Local`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local)
+  at revision `b9ce18a6887e18c089fdea8509a33e63429a3300` (~96 GiB; loading takes about 81 GiB of memory with vision on, measured).
+- Checkpoint (optional, `CHECKPOINT=int4`): [`azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound`](https://huggingface.co/azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound)
   at revision `1464274120d36a4d8fcaa934552334a7d83ce0fd` (~122 GiB). Routed experts are GPTQ int4 (group size 128), the
   n-gram table is FP8 and lives in `ple-table/`, and it is loaded with the weights. There is no SSD n-gram reader and
   no int8 KV cache. KV is FP8 by default (lossy, ~98.8% top-1 agreement with bf16); `KV_DTYPE=bf16` is exact. FP8 works with image and video input.
 - API model id: `Qwen3.8-Flash-Next`
-- Context: **262,144 tokens** a request (the native window). Up to 8 requests at once. A full window's
+- Context: **262,144 tokens** a request (the native window). Up to 5 requests at once (`PARALLEL`). A full window's
   fp8 cache is 4.37 GiB (bf16 is 7.52 GiB). The engine grows each request's cache as it goes and refuses one that would not fit, keeping
   10 GiB free, and another 2 GiB for the vision helper.
 - One command: `./start.sh` sets everything up on the first run and starts the server; `./stop.sh` stops it
 
 ## Performance
 
-Measured with sparkDash on spark4, 2026-10-08, engine `20e709a` (image `tensorfold-qwen38:zig-db28187`, patches `d84d7cc22655`): FP8 KV, vision on, `PARALLEL` 8, a 262,144-token window. Greedy, thinking off. Aggregate is every stream's tokens over the time from the first token of the earliest stream to the last token of the latest. The FP8 n-gram table is on the GPU, and MTP drafts are checked against the model's own sample.
+Measured on a DGX Spark (GB10, 121 GiB, 115 GiB available) with the NVIDIA FP4 checkpoint, the Zig engine built from `patches/`,
+`./start.sh` defaults (262,144-token window, 5 requests, fp8 KV, vision on, MTP drafts), greedy, thinking off, 256 tokens a
+request, median of 3. The "Total" column is the sum of the per-request decode speeds the server reports. The Python recipe
+numbers are our earlier Python build of the same checkpoint (patches 0003-0006), not the INT4-AutoRound recipe, measured on the same machine.
 
-**Decode, prose** (sparkDash)
+**Decode, prose** (Zig measured on the guest Spark with `tools/bench_streams.py`; the Python column is our earlier Python build of the same checkpoint, measured on the same machine with the same tool)
 
-| Concurrent requests | Aggregate | Per request | Time to first token |
-| ---: | ---: | ---: | ---: |
-| 1 | 64.4 tok/s | 64.4 tok/s | 98 ms |
-| 2 | 89.0 tok/s | 46.4 tok/s | 180 ms |
-| 4 | 140.7 tok/s | 37.2 tok/s | 216 ms |
-| 8 | 200.9 tok/s | 26.7 tok/s | 405 ms |
+| Concurrent requests | Zig total | Zig per request | Zig TTFT | Python total | Python per request |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 49.7 tok/s | 49.7 | 70 ms | 49.5 | 49.5 |
+| 2 | 93.7 tok/s | 46.8 | 102 ms | 93.3 | 46.7 |
+| 3 | 132.0 tok/s | 44.0 | 134 ms | 123.5 | 41.2 |
+| 4 | 167.7 tok/s | 41.9 | 167 ms | 155.2 | 38.8 |
+| 5 | 187.2 tok/s | 37.4 | 197 ms | 180.0 | 36.0 |
 
-Against the Python recipe's prose table (62.4 / 90.5 / 106.7 / 119.3 at 1 / 2 / 4 / 5), one request is 64.4 against 62.4 and four are 140.7 against 106.7. Two requests are 89.0 against 90.5. Eight requests are 200.9; the Python recipe's five-request row was 119.3.
+**Decode, code**
 
-**Prefill** (sparkDash, one request)
+| Concurrent requests | Zig total | Zig per request | Zig TTFT | Python total | Python per request |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 51.3 tok/s | 51.3 | 69 ms | 57.1 | 57.1 |
+| 2 | 94.3 tok/s | 47.2 | 102 ms | 108.4 | 54.2 |
+| 3 | 136.5 tok/s | 45.5 | 134 ms | 145.0 | 48.3 |
+| 4 | 173.7 tok/s | 43.4 | 168 ms | 184.4 | 46.1 |
+| 5 | 203.1 tok/s | 40.6 | 194 ms | 215.0 | 43.0 |
 
-| Prompt | Tokens | Prefill speed | Time to first token |
-| ---: | ---: | ---: | ---: |
-| 4k | 4,134 | 2,526 tok/s | 1.64 s |
-| 8k | 8,232 | 2,606 tok/s | 3.16 s |
-| 16k | 16,422 | 2,643 tok/s | 6.21 s |
-| 32k | 32,804 | 2,630 tok/s | 12.47 s |
-| 64k | 65,578 | 2,564 tok/s | 25.57 s |
-| 128k | 131,111 | 2,415 tok/s | 54.30 s |
+Two full runs of the decode tables on a quiet machine agreed to within 1 tok/s except one prose point (5 streams: 186.8 and 187.2).
+(Thinking is on in these runs, so the "code" prompt, "Write a Python quicksort with docstring and tests.", is mostly
+reasoning prose at 256 tokens, which is why the Zig code and prose speeds are close.) The Zig engine matches the Python build
+on prose at one and two streams and is ahead from three streams on (+7% at 3, +4% at 5); on code it is behind at every count
+(51.3 against 57.1 tok/s at one stream, 203.1 against 215.0 at five). The Python build has copy drafting (draft tokens copied
+from earlier text), which helps most on code; the CUDA path of the Zig engine has no such drafter, only the MTP head.
+The Zig TTFT column is a repeat of the same short prompt (the benchmark's own): the server keeps a state one token short of a
+prompt it has served before, so a repeat prefills one row (about 50 ms of GPU time, the cost of any decode round). That repeat-prompt
+cache is why the TTFT is so low; a cold prompt takes longer: a first-time 63-token prompt costs about 170 ms (150 ms in the
+prompt pass: with 64 rows nearly every routed expert is read), and a long one costs its prefill (table below).
 
-Against the Python recipe's prefill (2,503 / 2,520 / 2,499 / 2,414 / 2,200 at 8k / 16k / 32k / 64k / 128k), this boot is ahead at each of those sizes.
+**Prefill** (one request, fresh prose each run so no prompt-cache hit, median of 3, tools/bench_streams.py)
 
-A 199,730-token needle on this boot was found (prefill 100.2 s). One 320×240 image took 0.22 s to the first token (99 prompt tokens), ten of them 0.65 s (836 tokens), and a 30-second 320×240 video 2.02 s (2,678 tokens).
+| Prompt tokens | Zig prefill | Zig TTFT | Python prefill | Python TTFT |
+| ---: | ---: | ---: | ---: | ---: |
+| 4.0k | 2,197 tok/s | 1.84 s | 2,315 (4k) | 1.96 s |
+| 7.9k | 2,195 tok/s | 3.64 s | 2,290 (8k) | 3.77 s |
+| 15.8k | 2,205 tok/s | 7.22 s | 2,273 (16k) | 7.40 s |
+| 31.5k | 2,193 tok/s | 14.41 s | 2,199 (32k) | 15.09 s |
+| 62.8k | 2,141 tok/s | 29.45 s | 2,049 (64k) | 32.18 s |
+| 125.8k | 2,029 tok/s | 62.18 s | 1,889 (128k) | 69.59 s |
 
-**Decode, code** (lab bench on the same boot: a short Python function, 256 tokens, end-of-sequence ignored)
+(`tools/bench_streams.py` sizes its prompts in generated words, about 0.8 tokens each, so its default `--sizes 5000,...,160000` give these rows.
+Prefill is slightly behind the Python build up to 16k, level at 32k and ahead from 64k.
+Needle in a haystack passes at 32k (prefill 16 s) and at 194,723 tokens (prefill 109.4 s, 1,780 tok/s). A single decode stream varies by
+a few tok/s from run to run, and a run taken while another job shared the machine read 34.8 tok/s.
 
-| Concurrent requests | Aggregate | Per request | Time to first token |
-| ---: | ---: | ---: | ---: |
-| 1 | 57.5 tok/s | 57.5 tok/s | 113 ms |
-| 2 | 92.7 tok/s | 73.9 tok/s | 166 ms |
-| 4 | 130.8 tok/s | 49.6 tok/s | 194 ms |
-| 8 | 189.3 tok/s | 40.1 tok/s | 379 ms |
+**Memory and mixed load** (default `./start.sh`, no `MEM_CHECK` override, guest Spark with about 116 GiB available before the start). The
+memory check passed (the window needed about 108 GiB at start). The engine loaded in 61 s and reported 24.36 GiB of sequence memory (the
+guest runs other containers, so this is less than the 30 GiB above). System memory in use: 85 GiB idle, 89 GiB after the 195k prompt, and a peak of
+98.6 GiB with five 100k-token prompts and six short ones in flight together. All five long prompts were answered correctly (each finds
+its own passphrase) and all short ones were right, with no crash and no hang. The prefill is serial: five 100k prompts took 265 s in all, and a short
+request sent while they ran waited for the prefills to finish (185 to 260 s) before it was answered.
 
-The tables below are the earlier bf16, text-only boot.
-The previous Python recipe on the MLX 4-bit checkpoint (int8 KV, n-gram tables read from SSD) measured prose decode at
-62.4 / 90.5 / 106.7 / 119.3 tok/s for 1 / 2 / 4 / 5 requests, and prefill at 2,503 / 2,520 / 2,499 / 2,414 / 2,200
-tok/s for 8k / 16k / 32k / 64k / 128k.
-
-**Decode, prose** (sparkDash, 2026-10-07, spark4, engine `6eb39c1`: greedy, thinking off, the hash-map prompt). That boot reported 33.28 GiB of sequence memory.
-
-| Concurrent requests | Aggregate | Per request | Time to first token |
-| ---: | ---: | ---: | ---: |
-| 1 | 63.3 tok/s | 63.3 tok/s | 101 ms |
-| 2 | 95.4 tok/s | 49.0 tok/s | 162 ms |
-| 3 | 118.5 tok/s | 43.2 tok/s | 227 ms |
-| 4 | 148.6 tok/s | 39.7 tok/s | 275 ms |
-
-Against the Python recipe's prose table, one request is 63.3 against 62.4, two are 95.4 against 90.5, and four are 148.6 against 106.7. The Python recipe's five-request row was 119.3 tok/s; this run stopped at four, the number of full windows the cache budget holds.
-
-**Prefill** (same boot, one request, greedy, thinking off)
-
-| Prompt | Tokens | Prefill speed | Time to first token |
-| ---: | ---: | ---: | ---: |
-| ~8k | 6,574 | 768 tok/s | 8.57 s |
-| ~16k | 13,107 | 1,300 tok/s | 10.09 s |
-| ~32k | 26,209 | 1,678 tok/s | 15.62 s |
-| ~64k | 52,386 | 1,971 tok/s | 26.57 s |
-| ~128k | 104,775 | 1,991 tok/s | 52.63 s |
-
-The 6,574-token row is the first long prefill after load. The later rows are 1,300 to 1,991 tok/s, under the Python recipe's 2,200-2,520. A 199,730-token needle on the same boot prefilled in 123.1 s (1,623 tok/s) and the passphrase was found.
+**Quality.** Teacher forcing the Python build's greedy output of seven prompts through the Zig engine, its next token equals
+the Python token at 2,270 of 2,295 positions (98.9%); the disagreements are near-ties between two plausible words
+(`tools/teacher_force.py` is not part of this recipe; see the lab notes). `tools/toolcheck.py` and `tools/visioncheck.py` pass.
+Greedy free-running output differs from the Python build after 85 to 350 characters in six of seven prompts for that reason.
 
 ## Requirements
 
 - A DGX Spark (or another GB10 system with 128 GB unified memory) with nothing else large on the GPU. The default
-  window needs about 92 GiB `MemAvailable` at start (weights ~66 GiB, one full cache, scratch slack and a floor).
+  window needs `MemAvailable` of about 108 GiB at start with the NVIDIA checkpoint (loading takes ~81 GiB) and 93 GiB with
+  `CHECKPOINT=int4` (weights ~66 GiB): weights, one full cache, scratch slack and a floor.
   `start.sh` stops before launching below that (`MEM_NEED_GIB`).
 - Docker with the NVIDIA container runtime, and your user in the `docker` group.
-- ~160 GB free disk on a fresh machine: ~122 GiB for the checkpoint under `~/.cache/huggingface` and the image under
+- ~160 GB free disk on a fresh machine: ~96 GiB (NVIDIA FP4) or ~122 GiB (INT4-AutoRound) for the checkpoint under `~/.cache/huggingface` and the image under
   Docker's root. `scripts/prepare.sh` checks both. Keep at least 100 GB free.
 - Optional: the `hf` CLI on the host and a Hugging Face token in `~/.cache/huggingface/token` or `HF_TOKEN`. The
   checkpoint is public.
@@ -232,7 +245,8 @@ the docker command and changes nothing.
    on `nvcr.io/nvidia/pytorch:26.07-py3`, and the TP=1 Triton kernel set (cubins pinned with `KERNEL_SOURCE_MTIME`).
    It tries the matching prebuilt image from GitHub Container Registry first (`PULL=0` builds locally).
 3. The checkpoint, at the pinned revision.
-4. A check that it is GPTQ int4 `qwen4_exp` with its `ple-table/` n-gram files and every shard present.
+4. A check that it is a `qwen4_exp` ModelOpt NVFP4 checkpoint (or the GPTQ int4 one with its `ple-table/` n-gram files) and
+   every shard present.
 
 ```bash
 scripts/prepare.sh
@@ -317,7 +331,7 @@ Every setting lives in [`scripts/config.sh`](scripts/config.sh). Override it fro
 | `PARALLEL` | `8` | requests decoded together. One that would not fit (prompt plus `max_tokens`) is refused |
 | `CONTEXT` | `262144` | prompt + reply window. `1048576` turns on YaRN factor 4 |
 | `DRAFTS` | `1` | MTP drafts; `0` passes `--no-drafts` |
-| `TF_FLASHNEXT_DEPTH` | `15` | drafts a round. The stop rule is the engine's hybrid (see `TF_FLASHNEXT_PRODUCT_STREAMS`) |
+| `TF_FLASHNEXT_DEPTH` | `6` | drafts a round. The stop rule is the engine's hybrid (see `TF_FLASHNEXT_PRODUCT_STREAMS`) |
 | `TEMPERATURE` / `TOP_P` / `TOP_K` | `1.0` / `0.95` / `20` | default sampling; a request's own values win |
 | `THINKING` | `1` | think before answering; `0` passes `--no-thinking` |
 | `MAX_TOKENS` | `32768` | the reply budget when a request sets none |
@@ -330,7 +344,9 @@ Every setting lives in [`scripts/config.sh`](scripts/config.sh). Override it fro
 | `PORT` / `HOST` | `8888` / `0.0.0.0` | where the API listens |
 | `KV_DTYPE` | `fp8` | lossy (~98.8% top-1 agreement with bf16, about 1.8x the pool). `bf16` is exact. Works with `VISION=1`. Adapted from MiaAI-Lab's GLM recipe patch `0038-glm-kv-fp8` |
 | `TENSORFOLD_MEMORY_RESERVE_GIB` | `10` | kept free when the engine sizes the pool. `prepare.sh` and `start.sh` refuse a Spark below this |
-| `TF_FLASHNEXT_PRODUCT_STREAMS` | `2` | running-product draft stop at this many streams or fewer; confidence 0.5 above it |
+| `TF_FLASHNEXT_PRODUCT_STREAMS` | `5` | running-product draft stop at this many streams or fewer; confidence 0.5 above it |
+| `TF_FLASHNEXT_REPEAT_CACHE` | `1` | a prompt the server has served before keeps a state one token short of its end, so a repeat prefills one row (63-token prompt: TTFT 170 ms to 70 ms). `0` turns it off |
+| `TF_FLASHNEXT_ADMIT_WAIT_MS` | `3` | an idle server waits this long after a first request for others sent with it, so a burst prefills in one pass and decodes in step |
 | `TF_FLASHNEXT_PREFILL_TAIL` | `512` | a short last prompt chunk joins the previous one |
 | `MODEL_REVISION` | `14642741…` | the checkpoint commit this recipe serves |
 
@@ -379,6 +395,7 @@ checked: a drafted reply matches `"draft": false`.
 | `tools/needle.py` | a passphrase in a ~200,000-token prompt |
 | `tools/prompt_reuse.py` | a resumed prompt matches a fresh one |
 | `tools/bench.py` | prefill at 8k-128k and a short decode |
+| `tools/bench_streams.py` | decode at 1 to 5 concurrent requests (prose and code, with TTFT) and prefill 4k to 128k, median of 3 |
 | `tools/context_boundary.py` | a prompt plus reply that fills `--context` succeeds; one token over returns HTTP 400. Authored by [321sssrt-bit](https://github.com/321sssrt-bit) |
 
 ## Repository layout
@@ -398,7 +415,7 @@ NOTICE        third-party notices
 ## License
 
 MIT, see [`LICENSE`](LICENSE). The model weights, downloaded from Hugging Face and not part of this repository, are
-under the Qwen Community License 1.0, and the INT4-AR checkpoint under the license on its model card.
+under the Qwen Community License 1.0, and the checkpoint under the license on its model card (NVIDIA Open Model Agreement for the NVIDIA FP4 checkpoint).
 
 **Third-party software in the image.** The image `scripts/prepare.sh` builds is based on NVIDIA's PyTorch container
 `nvcr.io/nvidia/pytorch:26.07-py3`, redistributed as a value-added runtime image. The NVIDIA software in it is
@@ -412,7 +429,8 @@ covers this repository's scripts only.
 Built on [TensorFold](https://github.com/ashhart/TensorFold) by Ash Hart ([ashhart](https://github.com/ashhart)) and
 the TensorFold contributors, the Zig CUDA serving path by Jürgen Schmied
 ([jschmied](https://github.com/jschmied), [PR #443](https://github.com/ashhart/TensorFold/pull/443)),
-[Qwen3.8 Flash Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by Qwen, and the INT4-AR checkpoint by
+[Qwen3.8 Flash Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by Qwen, the default FP4 QAD checkpoint by
+[NVIDIA](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local) (Model Optimizer), and the optional INT4-AR checkpoint by
 [azampatti](https://huggingface.co/azampatti), with its AutoRound int4 quantization by
 [Intel](https://huggingface.co/Intel/Qwen3.8-Flash-Next-W4A16-AutoRound) and its hybrid checkpoint and FP8 n-gram
 table by [Saren-Arterius](https://github.com/Saren-Arterius). Image and video support is adapted from MiaAI-Lab's

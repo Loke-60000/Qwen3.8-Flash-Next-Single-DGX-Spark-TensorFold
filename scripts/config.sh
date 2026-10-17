@@ -16,12 +16,28 @@ if [[ -f .env ]]; then
 fi
 unset _line _key _value
 
-# One checkpoint: azampatti's INT4-AutoRound (top-5 routing, 4.8B active, GPTQ int4 experts, FP8 n-gram table
-# in ple-table/). The engine reads the format from the checkpoint. There is no second quant in this recipe.
-MODEL_ID="${MODEL_ID:-azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound}"
-MODEL_REVISION="${MODEL_REVISION:-1464274120d36a4d8fcaa934552334a7d83ce0fd}"
-CKPT_GIB=122
-QUANT_LABEL="INT4-AutoRound"
+# Checkpoint. The default is NVIDIA's quantization-aware-distilled FP4 (NVFP4 routed experts, MXFP8 and bf16 elsewhere,
+# FP8 n-gram table, MTP head): nvidia/Qwen3.8-Flash-Next-FP4-Local, ~96 GiB. azampatti's INT4-AutoRound (top-5 routing,
+# GPTQ int4 experts, ~122 GiB) stays available: CHECKPOINT=int4 ./start.sh, or set MODEL_ID and MODEL_REVISION yourself.
+# The engine reads the format from the checkpoint. WEIGHTS_GIB is what loading takes of MemAvailable (measured on the Zig engine:
+# 81 GiB for the NVIDIA checkpoint with vision on).
+CHECKPOINT="${CHECKPOINT:-nvfp4}"
+_pin=1; [[ -z "${MODEL_ID:-}" ]] || _pin=0       # a MODEL_ID set by hand takes no preset revision pin
+case "$CHECKPOINT" in
+  nvfp4)
+    : "${MODEL_ID:=nvidia/Qwen3.8-Flash-Next-FP4-Local}"
+    (( ! _pin )) || : "${MODEL_REVISION:=b9ce18a6887e18c089fdea8509a33e63429a3300}"
+    CKPT_GIB=96; WEIGHTS_GIB="${WEIGHTS_GIB:-81}"
+    QUANT_LABEL="NVIDIA FP4 QAD: NVFP4 experts, MXFP8" ;;
+  int4)
+    : "${MODEL_ID:=azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound}"
+    (( ! _pin )) || : "${MODEL_REVISION:=1464274120d36a4d8fcaa934552334a7d83ce0fd}"
+    CKPT_GIB=122; WEIGHTS_GIB="${WEIGHTS_GIB:-66}"
+    QUANT_LABEL="INT4-AutoRound" ;;
+  *) echo "CHECKPOINT is nvfp4 or int4, not $CHECKPOINT" >&2; exit 1 ;;
+esac
+MODEL_REVISION="${MODEL_REVISION:-}"
+unset _pin
 
 # The engine: TensorFold's Zig engine, built from TF_REPO at TF_REF (branch zig-flashnext) with patches/*.patch
 # applied (git apply in the checkout's root), with Zig ZIG_VERSION. Only the Zig build goes into the image.
@@ -55,7 +71,7 @@ SERVED_NAME="${SERVED_NAME:-Qwen3.8-Flash-Next}"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8888}"
 # Native window 262,144. Past it the engine applies Qwen's YaRN (factor 4) when TF_FLASHNEXT_YARN=4, up to 1,048,576.
-# On one Spark a full 1M-token fp8 cache is 17.46 GiB (bf16 is 30.06 GiB) on top of ~66 GiB of weights; a full 1M
+# On one Spark a full 1M-token fp8 cache is 17.46 GiB (bf16 is 30.06 GiB) on top of the weights (~66 GiB INT4, ~81 NVIDIA FP4); a full 1M
 # prompt's scratch on top of that is not the default. The default stays the native window.
 CONTEXT="${CONTEXT:-262144}"
 if [[ "$CONTEXT" =~ ^[0-9]+$ ]] && (( CONTEXT > 262144 )); then _yarn=4; else _yarn=0; fi
@@ -64,15 +80,19 @@ unset _yarn
 # Requests decoded together. The engine admits each one inside its own budget (MemAvailable after load, less
 # TENSORFOLD_MEMORY_RESERVE_GIB, and with VISION=1 less another 2 GiB kept for the vision helper) and refuses one
 # that would not fit. The pool is shared: streams grow on demand, so PARALLEL is a cap, not a promise that every
-# stream can sit at a full 262,144-token window at once. The default is filled in after the FP8+vision measurement.
-PARALLEL="${PARALLEL:-8}"
+# stream can sit at a full 262,144-token window at once. Measured on a 121 GiB Spark (NVIDIA FP4, fp8 KV, vision on): the
+# engine reports a 24.3 GiB sequence pool after load, one full 262,144 window is 4.4 GiB, so 5 streams x 262,144 fit
+# (21.9 GiB); 8 streams at full windows do not (35 GiB), they share the pool. 5 is the default for that reason.
+PARALLEL="${PARALLEL:-5}"
 # MTP: up to this many drafts a round, kept while confidence stays at least this. Drafts are checked, so replies match
-# serial decoding. PROVISIONAL with the gated engine (6eb39c1).
-export TF_FLASHNEXT_DEPTH="${TF_FLASHNEXT_DEPTH:-15}"
+# serial decoding. 6 drafts: on the NVIDIA FP4 checkpoint deeper chains (the engine's 15) cost verify rows and lose 5 to 20%
+# at 3 to 5 streams (measured, 1 to 5 streams, depths 4 to 15); 4 to 8 are within noise of each other.
+export TF_FLASHNEXT_DEPTH="${TF_FLASHNEXT_DEPTH:-6}"
 # Unset TF_FLASHNEXT_CONFIDENCE: the engine uses the running product (-0.4) while at most
 # TF_FLASHNEXT_PRODUCT_STREAMS streams are live, and confidence 0.5 above that. Setting
-# TF_FLASHNEXT_CONFIDENCE=0.5 forces the per-draft rule at every width.
-export TF_FLASHNEXT_PRODUCT_STREAMS="${TF_FLASHNEXT_PRODUCT_STREAMS:-2}"
+# TF_FLASHNEXT_CONFIDENCE=0.5 forces the per-draft rule at every width. 5 (= PARALLEL's default): the product at every
+# width the default serves.
+export TF_FLASHNEXT_PRODUCT_STREAMS="${TF_FLASHNEXT_PRODUCT_STREAMS:-5}"
 export TF_FLASHNEXT_PREFILL_TAIL="${TF_FLASHNEXT_PREFILL_TAIL:-512}"
 # KV cache (--kv-dtype). fp8 is the default: about 1.84x the pool of bf16, and lossy (~98.8% top-1 agreement with a
 # bf16 cache, so a free-running reply can differ). bf16 is exact: KV_DTYPE=bf16. FP8 works together with --vision.
@@ -99,9 +119,9 @@ export TENSORFOLD_VISION_WORKSPACE_MIB="${TENSORFOLD_VISION_WORKSPACE_MIB:-2048}
 export TENSORFOLD_MEMORY_RESERVE_GIB="${TENSORFOLD_MEMORY_RESERVE_GIB:-10}"
 export TENSORFOLD_NO_UPDATE_CHECK="${TENSORFOLD_NO_UPDATE_CHECK:-1}"
 
-# There is no int8 cache and no SSD n-gram reader: the FP8 n-gram table is loaded with the weights
-# (~65.7 GiB measured, table included).
-# Memory at start. Weights ~66 GiB. One full window's cache is kv_gib below. Prefill scratch is outside the engine's
+# There is no int8 cache and no SSD n-gram reader: the FP8 n-gram table is loaded with the weights (WEIGHTS_GIB,
+# table included: 65.7 GiB measured for INT4-AutoRound, about 81 measured for the NVIDIA checkpoint: MemAvailable fell from 117.3 to 36.3 GiB at load with vision on and 8 slots, which includes the 0.84 GiB vision tower and kernels).
+# Memory at start. Weights WEIGHTS_GIB. One full window's cache is kv_gib below. Prefill scratch is outside the engine's
 # cache budget; 8 GiB here is slack for a 2048-row chunk, not a measured 1M-prompt peak. MEM_FLOOR_GIB is the line
 # start.sh stops the server at while it loads, and the line prepare.sh refuses to start below. MEM_CHECK=0 turns
 # both into a warning.
@@ -120,7 +140,7 @@ kv_gib() {
 mem_need_gib() {
   local ctx=${1:-$CONTEXT} vision=0
   [[ "$VISION" == 1 ]] && vision=2
-  echo $(( 66 + $(kv_gib "$ctx") + 8 + vision + MEM_FLOOR_GIB + 2 ))
+  echo $(( WEIGHTS_GIB + $(kv_gib "$ctx") + 8 + vision + MEM_FLOOR_GIB + 2 ))
 }
 
 HF_CACHE="${HF_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}}"
@@ -128,7 +148,7 @@ KERNEL_CACHE="${KERNEL_CACHE:-$HOME/.cache/tensorfold-qwen38}"
 STATE_DIR="${STATE_DIR:-$HOME/.local/state/qwen38-flash-next-tf}"
 LOG_DIR="${LOG_DIR:-$HOME/.cache/tensorfold-qwen38/logs}"
 LOG_KEEP="${LOG_KEEP:-10}"
-MIN_FREE_GB="${MIN_FREE_GB:-140}"
+MIN_FREE_GB="${MIN_FREE_GB:-$((CKPT_GIB + 18))}"
 IMAGE_FREE_GB="${IMAGE_FREE_GB:-40}"
 
 _c() { [[ -t "$1" ]] && printf '\033[%sm' "$2" || true; }

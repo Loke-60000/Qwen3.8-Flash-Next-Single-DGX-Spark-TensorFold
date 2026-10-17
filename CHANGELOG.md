@@ -5,7 +5,19 @@ Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:
 
 ## Unreleased
 
-Script and tool fixes only; the image and `patches/` are unchanged.
+- Zig engine tuning (`patches/0013-engine-tune.patch`, `scripts/config.sh`): `TF_FLASHNEXT_DEPTH` 6 and `TF_FLASHNEXT_PRODUCT_STREAMS` 5
+  (the engine's 15 drafts a round cost verify rows: 3 to 5 streams +20 to 28%); a prompt the server has served before keeps a state
+  one token short of its end, so a repeat prefills one row (`TF_FLASHNEXT_REPEAT_CACHE=0` off); an idle server waits 3 ms for
+  requests sent together (`TF_FLASHNEXT_ADMIT_WAIT_MS`), so a burst prefills in one pass and decodes in step instead of
+  staggered. Greedy output is unchanged (token hashes equal to the earlier build's). `TF_FLASHNEXT_ROUND_LOG=1` logs the round's time by part.
+
+- The default checkpoint is NVIDIA's QAD FP4 export, `nvidia/Qwen3.8-Flash-Next-FP4-Local` (91.5% GPQA Diamond, 88.7%
+  ToolEvalBench against 92.2% and 89.4% for bf16, model card). `CHECKPOINT=int4` selects the INT4-AutoRound checkpoint as
+  before. `scripts/config.sh` has per-checkpoint pin, size and `WEIGHTS_GIB` (81 GiB measured for the NVIDIA one); `prepare.sh`
+  verifies either format. `patches/0011-vision-nvidia-fp4.patch`: the vision helper reads this checkpoint's quantized
+  tower (MXFP8 attention, NVFP4 MLP). `patches/0012-engine-nvidia-fp4.patch`: the Zig engine loads and runs this checkpoint (CSF-coded NVFP4 scales, MXFP8 shared experts and attention, FP8 n-gram table, MTP head). Defaults are now 5 requests at a 262,144 window: the sequence pool after load is 24.3 GiB, five full fp8 windows are 21.9 GiB. Credit: TensorFold Contributors. Final verification on a fresh clone (prepare.sh, then start.sh with defaults, memory check passed; tools/toolcheck.py, tools/visioncheck.py, needle at 194,723 tokens, a 5 x 100k plus short mixed stress all pass; greedy output equals the engine reference on 7 of 7 prompts, token hashes included). Measured on this engine (median of 3): decode 49.7 / 93.7 / 132.0 / 167.7 / 187.2 tok/s total at 1 to 5 streams on prose, 51.3 / 94.3 / 136.5 / 173.7 / 203.1 on code; prefill 2,197 tok/s at 4k to 2,029 at 126k (62.2 s). The earlier Python build on the same machine and tool: 49.5 / 93.3 / 123.5 / 155.2 / 180.0 prose, 57.1 / 108.4 / 145.0 / 184.4 / 215.0 code. TTFT of repeated bench prompts is low because of the repeat-prompt cache; cold prompts take longer. The Python build is faster on code at every stream count and has copy drafting that the CUDA Zig engine lacks. `tools/bench_streams.py` runs these tables; `DOCKER_BUILD_ARGS` (for example `--network host`) is passed to `docker build` by `prepare.sh`.
+
+Script and tool fixes:
 
 - `start.sh` reads `MemAvailable` from `/proc/meminfo`. It used `free -g | awk '/^Mem:/'`, which came back empty on
   non-English systems (`Speicher:`, `内存：`) and refused to start. Reported by

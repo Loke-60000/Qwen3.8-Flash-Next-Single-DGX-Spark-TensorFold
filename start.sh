@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Serve Qwen3.8 Flash Next (azampatti's INT4-AutoRound checkpoint) with TensorFold's Zig engine on one DGX Spark:
+# Serve Qwen3.8 Flash Next (NVIDIA's QAD FP4 checkpoint by default, CHECKPOINT=int4 for azampatti's INT4-AutoRound) with TensorFold's Zig engine on one DGX Spark:
 # runs scripts/prepare.sh when the image or the checkpoint is not ready, launches tensorfold-native serve on port
 # 8888, waits until the OpenAI API answers, then runs a smoke test. Stop it with ./stop.sh.
 #
 # Usage: ./start.sh [restart] [extra tensorfold-native serve args]
-#   ./start.sh                         # up to 8 requests at once, a 262,144-token window, fp8 KV, image and video, MTP drafts
+#   ./start.sh                         # up to 5 requests at once, a 262,144-token window, fp8 KV, image and video, MTP drafts
 #   ./start.sh restart                 # stop, then start again; the new arguments are checked before stopping
 #   ./start.sh restart --parallel 2 --context 131072
 #   CONTEXT=1048576 ./start.sh restart # YaRN factor 4; a full 1M prompt does not leave 10 GiB free on one Spark
@@ -13,7 +13,7 @@
 # Extra arguments go to tensorfold-native serve after the defaults, so they win.
 # Settings, from the environment or ./.env (scripts/config.sh):
 #   serving  CONTEXT, PARALLEL, MAX_TOKENS, THINKING, DRAFTS, TEMPERATURE, TOP_P, TOP_K, SERVED_NAME, HOST, PORT
-#   files    MODEL_ID, MODEL_REVISION, HF_CACHE, KERNEL_CACHE, STATE_DIR
+#   files    CHECKPOINT (nvfp4 | int4), MODEL_ID, MODEL_REVISION, HF_CACHE, KERNEL_CACHE, STATE_DIR
 #   image    IMAGE, TF_REPO, TF_REF, ZIG_VERSION, BASE_IMAGE, GHCR_IMAGE, CONTAINER_NAME
 #   setup    PREPARE (auto | 1 | 0), PULL, FOREGROUND=1, WAIT_TIMEOUT, DRY_RUN=1, MEM_NEED_GIB, MEM_CHECK=0
 #   engine   every TENSORFOLD_* and TF_FLASHNEXT_* variable goes into the container
@@ -162,8 +162,8 @@ else
   if (( DRY )) || [[ "${MEM_CHECK:-1}" == 0 ]]; then warn "$msg"; else die "$msg (MEM_CHECK=0 starts anyway)"; fi
 fi
 full=$(kv_gib "$(arg_value --context)")
-if (( PARALLEL * full + 66 + TENSORFOLD_MEMORY_RESERVE_GIB > 121 )); then
-  warn "$PARALLEL full windows are ~$((PARALLEL * full)) GiB of $KV_DTYPE cache beside ~66 GiB of weights: the engine keeps $TENSORFOLD_MEMORY_RESERVE_GIB GiB free and refuses a request that would not fit"
+if (( PARALLEL * full + WEIGHTS_GIB + TENSORFOLD_MEMORY_RESERVE_GIB > 121 )); then
+  warn "$PARALLEL full windows are ~$((PARALLEL * full)) GiB of $KV_DTYPE cache beside ~$WEIGHTS_GIB GiB of weights: the engine keeps $TENSORFOLD_MEMORY_RESERVE_GIB GiB free and refuses a request that would not fit"
 fi
 
 ENV_ARGS=(-e HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}" -e TENSORFOLD_CUDA_KERNELS="$KERNELS_PATH")
@@ -196,7 +196,7 @@ if [[ "${FOREGROUND:-0}" == 1 ]]; then
   exit "$(docker inspect -f '{{.State.ExitCode}}' "$CONTAINER_NAME" 2>/dev/null || echo 1)"
 fi
 
-step 4 "Loading: ~66 GiB of weights (the FP8 n-gram table included)"
+step 4 "Loading: ~$WEIGHTS_GIB GiB of weights (the FP8 n-gram table included)"
 NOISE='^\s*$|^=+$|^== PyTorch ==|^NVIDIA Release|Copyright|All rights reserved|PyTorch Version|Various files include|NOTE: CUDA Forward|Using CUDA|cuda-compatibility|Container image|^\[tensorfold\] [^ ]+ "GET /(health|v1/models|models|metrics|stats|slots)[ ?]'
 docker logs -f "$CONTAINER_NAME" > >(grep --line-buffered -v -E "$NOISE" | sed -u "s/^/  ${D}│${R} /") 2>&1 &
 LOGS_PID=$!
