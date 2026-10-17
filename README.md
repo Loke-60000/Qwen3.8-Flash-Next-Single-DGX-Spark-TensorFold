@@ -18,47 +18,6 @@ Serve **Qwen3.8 Flash Next** from a single NVIDIA DGX Spark (GB10, 128 GB) throu
 [`zig-flashnext`](https://github.com/ashhart/TensorFold/tree/zig-flashnext)), in NVIDIA's PyTorch container. One GPU,
 with image and video input (`VISION=1`). `VISION=0` serves text only.
 
-**Credits.** [TensorFold](https://github.com/ashhart/TensorFold) and its Zig engine are by Ash Hart
-([ashhart](https://github.com/ashhart)) and the [TensorFold contributors](https://github.com/ashhart/TensorFold/graphs/contributors),
-branch [`zig-flashnext`](https://github.com/ashhart/TensorFold/tree/zig-flashnext). The Flash Next CUDA engine in this
-recipe is ported from TensorFold's Python Flash Next engine, written by Ash Hart and the TensorFold contributors.
-The Zig CUDA serving path and the CUDA family registry this recipe runs on were authored by Jürgen Schmied
-([jschmied](https://github.com/jschmied)) in [TensorFold PR #443](https://github.com/ashhart/TensorFold/pull/443)
-(commit [`59e77e8`](https://github.com/ashhart/TensorFold/commit/59e77e8f4b875ce0e863a8c896fc8e424bc539ac)).
-[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) is by the Qwen team (Alibaba). The default checkpoint is NVIDIA's
-[FP4 QAD export](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local) (Model Optimizer). The optional INT4 checkpoint is
-by azampatti ([azampatti](https://huggingface.co/azampatti)), who authored its top-5 expert cut, the shared-expert
-healing and the checkpoint,
-[`azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound`](https://huggingface.co/azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound);
-its AutoRound int4 quantization is by Intel
-([`Intel/Qwen3.8-Flash-Next-W4A16-AutoRound`](https://huggingface.co/Intel/Qwen3.8-Flash-Next-W4A16-AutoRound)), and
-its hybrid checkpoint and FP8 n-gram table are by Saren-Arterius ([Saren-Arterius](https://github.com/Saren-Arterius),
-[`Saren/Qwen3.8-Flash-Next-ple-table-fp8`](https://huggingface.co/Saren/Qwen3.8-Flash-Next-ple-table-fp8)).
-[Zig](https://ziglang.org) is by the Zig Software Foundation and the Zig contributors. The image is based on
-NVIDIA's [PyTorch container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch). The one-shot RoCE
-all-gather in the engine implements the RoCEnante protocol of [b12x](https://github.com/local-inference-lab/b12x) by
-local-inference-lab (Apache-2.0); that implementation is new code, and this one-Spark recipe leaves it off.
-Image and video support is adapted from MiaAI-Lab's single-Spark patches 0008 and 0009 and from TensorFold's vision
-code, written by Ash Hart and the [TensorFold contributors](https://github.com/ashhart/TensorFold/graphs/contributors).
-The FP8 KV format (`KV_DTYPE=fp8`) is adapted from MiaAI-Lab's GLM recipe patch `0038-glm-kv-fp8` in
-[GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold).
-The helper uses Hugging Face [transformers](https://github.com/huggingface/transformers) (Apache 2.0) for the tower
-modules and the image processor, [PyAV](https://github.com/PyAV-Org/PyAV) and [FFmpeg](https://ffmpeg.org/) for video
-decoding, and [Pillow](https://python-pillow.org/) for image decoding.
-[MovieMaker93](https://github.com/MovieMaker93) authored the prompt-chunk change this recipe used on TensorFold's
-Python engine ([TensorFold #40](https://github.com/ashhart/TensorFold/pull/40)). Javier
-([jvr0x](https://github.com/jvr0x)) authored the language draft vocabularies that recipe added for MTP
-([#84](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark/pull/84)). The checkpoint this recipe served
-before the Zig engine was by [Vontra](https://huggingface.co/Vontra),
-[`Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP`](https://huggingface.co/Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP).
-[321sssrt-bit](https://github.com/321sssrt-bit) authored the full-window admission fix and
-`tools/context_boundary.py` in the two-Spark recipe
-([issue #1](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Dual-DGX-Sparks-TensorFold/issues/1),
-[PR #2](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Dual-DGX-Sparks-TensorFold/pull/2)): a request whose prompt plus
-`max_tokens` equals the window is admitted, because the engine already keeps the draft rows beyond that window.
-More in [Credits](#credits) and
-[`CREDITS.md`](CREDITS.md).
-
 The default checkpoint is NVIDIA's FP4 QAD export: routed experts in NVFP4 (group size 16, CSF-compressed scale factors),
 attention and shared-expert linears in MXFP8, the MTP experts and the vision tower quantized too (MXFP8 attention, W4A16
 NVFP4 MLP), an FP8 n-gram table, and all 512 routed experts with 10 per token (the INT4 cut keeps 5). The optional INT4-AutoRound checkpoint (`CHECKPOINT=int4`) uses 5 experts per token (4.8B active
@@ -589,28 +548,42 @@ covers this repository's scripts only.
 
 ## Credits
 
-Built on [TensorFold](https://github.com/ashhart/TensorFold) by Ash Hart ([ashhart](https://github.com/ashhart)) and
-the TensorFold contributors, the Zig CUDA serving path by Jürgen Schmied
-([jschmied](https://github.com/jschmied), [PR #443](https://github.com/ashhart/TensorFold/pull/443)),
-[Qwen3.8 Flash Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by Qwen, the default FP4 QAD checkpoint by
-[NVIDIA](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local) (Model Optimizer), and the optional INT4-AR checkpoint by
-[azampatti](https://huggingface.co/azampatti), with its AutoRound int4 quantization by
-[Intel](https://huggingface.co/Intel/Qwen3.8-Flash-Next-W4A16-AutoRound) and its hybrid checkpoint and FP8 n-gram
-table by [Saren-Arterius](https://github.com/Saren-Arterius). Image and video support is adapted from MiaAI-Lab's
-patches 0008 and 0009 and from TensorFold's vision code by Ash Hart and the TensorFold contributors. The helper uses
-Hugging Face [transformers](https://github.com/huggingface/transformers), [PyAV](https://github.com/PyAV-Org/PyAV),
-FFmpeg and [Pillow](https://python-pillow.org/). The FP8 KV format is adapted from MiaAI-Lab's GLM recipe patch
-`0038-glm-kv-fp8`. The one-shot RoCE all-gather implements the RoCEnante protocol of
-[b12x](https://github.com/local-inference-lab/b12x) by local-inference-lab; this recipe leaves it off.
-The prompt-chunk change on the earlier Python engine was by [MovieMaker93](https://github.com/MovieMaker93)
-([TensorFold #40](https://github.com/ashhart/TensorFold/pull/40)). Javier
-([jvr0x](https://github.com/jvr0x)) authored the language draft vocabularies of the earlier Python recipe
-([#84](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark/pull/84)); that draft-language image is not
-built anymore. [Zig](https://ziglang.org) is by the Zig Software Foundation and the Zig contributors. The previous
-checkpoint was by [Vontra](https://huggingface.co/Vontra).
-[321sssrt-bit](https://github.com/321sssrt-bit) authored the full-window admission fix and `tools/context_boundary.py`
-([issue #1](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Dual-DGX-Sparks-TensorFold/issues/1),
-[PR #2](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Dual-DGX-Sparks-TensorFold/pull/2)).
-The NVIDIA FP4 checkpoint support in the Zig engine (patches 0011 to 0013) is MiaAI-Lab's work, built on TensorFold's Python implementation of the same
-formats by the TensorFold Contributors. The performance numbers were measured with [sparkDash](https://github.com/MiaAI-Lab/sparkDash) by MiaAI-Lab.
+- **Engine:** [TensorFold](https://github.com/ashhart/TensorFold) and its Zig engine (`tensorfold-native`, branch
+  [`zig-flashnext`](https://github.com/ashhart/TensorFold/tree/zig-flashnext)) by Ash Hart ([ashhart](https://github.com/ashhart)) and the
+  [TensorFold contributors](https://github.com/ashhart/TensorFold/graphs/contributors). The Flash Next CUDA engine in this recipe is ported from
+  TensorFold's Python Flash Next engine, written by Ash Hart and the TensorFold contributors.
+- **Zig CUDA serving path and CUDA family registry:** Jürgen Schmied ([jschmied](https://github.com/jschmied)), in
+  [TensorFold PR #443](https://github.com/ashhart/TensorFold/pull/443)
+  (commit [`59e77e8`](https://github.com/ashhart/TensorFold/commit/59e77e8f4b875ce0e863a8c896fc8e424bc539ac)).
+- **NVIDIA FP4 support in the Zig engine** (patches 0011 to 0013): MiaAI-Lab, built on TensorFold's Python implementation of the same formats by the
+  TensorFold Contributors.
+- **Model:** [Qwen3.8 Flash Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by the Qwen team (Alibaba).
+- **Default checkpoint:** NVIDIA's [FP4 QAD export](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local) (Model Optimizer).
+- **Optional INT4 checkpoint** (`CHECKPOINT=int4`): [azampatti](https://huggingface.co/azampatti)'s
+  [`azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound`](https://huggingface.co/azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound)
+  (the top-5 expert cut, the shared-expert healing and the checkpoint), with its AutoRound int4 quantization by
+  [Intel](https://huggingface.co/Intel/Qwen3.8-Flash-Next-W4A16-AutoRound) and its hybrid checkpoint and FP8 n-gram table by
+  [Saren-Arterius](https://github.com/Saren-Arterius) ([`Saren/Qwen3.8-Flash-Next-ple-table-fp8`](https://huggingface.co/Saren/Qwen3.8-Flash-Next-ple-table-fp8)).
+- **Previous checkpoint** (before the Zig engine): [`Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP`](https://huggingface.co/Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP)
+  by [Vontra](https://huggingface.co/Vontra).
+- **Image and video input:** adapted from MiaAI-Lab's single-Spark patches 0008 and 0009 and from TensorFold's vision code by Ash Hart and the
+  TensorFold contributors. The helper uses Hugging Face [transformers](https://github.com/huggingface/transformers) (Apache 2.0) for the tower modules and the
+  image processor, [PyAV](https://github.com/PyAV-Org/PyAV) and [FFmpeg](https://ffmpeg.org/) for video decoding, and
+  [Pillow](https://python-pillow.org/) for image decoding.
+- **FP8 KV format** (`KV_DTYPE=fp8`): adapted from MiaAI-Lab's GLM recipe patch `0038-glm-kv-fp8` in
+  [GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold).
+- **Full-window admission fix and `tools/context_boundary.py`:** [321sssrt-bit](https://github.com/321sssrt-bit)
+  ([issue #1](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Dual-DGX-Sparks-TensorFold/issues/1),
+  [PR #2](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Dual-DGX-Sparks-TensorFold/pull/2)): a request whose prompt plus `max_tokens` equals the window is
+  admitted, because the engine already keeps the draft rows beyond that window.
+- **Prompt-chunk change** on the earlier Python engine: [MovieMaker93](https://github.com/MovieMaker93)
+  ([TensorFold #40](https://github.com/ashhart/TensorFold/pull/40)).
+- **Language draft vocabularies** of the earlier Python recipe: Javier ([jvr0x](https://github.com/jvr0x))
+  ([#84](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark/pull/84)); that draft-language image is not built anymore.
+- **RoCE all-gather:** the one-shot all-gather in the engine implements the RoCEnante protocol of [b12x](https://github.com/local-inference-lab/b12x) by
+  local-inference-lab; this recipe leaves it off.
+- **[Zig](https://ziglang.org)** by the Zig Software Foundation and the Zig contributors; the image is based on NVIDIA's
+  [PyTorch container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch).
+- **Benchmarks:** the performance numbers were measured with [sparkDash](https://github.com/MiaAI-Lab/sparkDash) by MiaAI-Lab.
+
 The full list is in [`CREDITS.md`](CREDITS.md).
