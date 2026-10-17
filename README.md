@@ -306,6 +306,43 @@ docker logs -f qwen38-flash-next-tf
 curl -s http://<spark-address>:8888/health
 ```
 
+## Choosing the checkpoint (FP4 or INT4)
+
+`./start.sh` serves NVIDIA's FP4 QAD checkpoint by default. To run the optional INT4-AutoRound checkpoint
+([`azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound`](https://huggingface.co/azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound))
+instead, set `CHECKPOINT=int4`:
+
+```bash
+CHECKPOINT=int4 ./start.sh restart       # stops the running server, then starts the INT4 one
+```
+
+The first time, `start.sh` runs `scripts/prepare.sh`, which downloads the INT4 checkpoint (~122 GiB) and checks it; later starts just load it.
+Nothing else needs to change: the image and the patches are the same for both checkpoints, and the engine reads the format from the checkpoint.
+
+To keep INT4 as your default, put it in `.env` next to `start.sh` (the environment still wins over it):
+
+```bash
+echo 'CHECKPOINT=int4' >> .env
+./start.sh restart
+```
+
+To go back to FP4, remove that line (or run `CHECKPOINT=nvfp4 ./start.sh restart`). Both checkpoints can sit in `~/.cache/huggingface` side by side
+(~96 GiB + ~122 GiB); switching only restarts the server, with no new download once both are cached.
+
+| | FP4 (`nvfp4`, default) | INT4 (`int4`) |
+| --- | --- | --- |
+| Model | [`nvidia/Qwen3.8-Flash-Next-FP4-Local`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local) | [`azampatti/…-125B-A5B-INT4-AutoRound`](https://huggingface.co/azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound) |
+| Experts per token | 10 of 512 (all experts kept) | 5 (top-5 cut, 4.8B active parameters) |
+| Quality | quantization-aware distillation, close to bf16 (see the top of this page) | about 10% lower general capability on its authors' harness |
+| Download / weights in memory | ~96 GiB / ~81 GiB | ~122 GiB / ~66 GiB |
+| `MemAvailable` needed at start | ~108 GiB | ~93 GiB |
+| Default requests at once (`PARALLEL`) | 5 | 5 (the INT4 numbers below were measured with 8: `PARALLEL=8 CHECKPOINT=int4 ./start.sh restart`) |
+| Speed | the tables above | the [INT4 tables](#optional-int4-autoround-checkpoint-checkpointint4) below (faster on this hardware) |
+
+Check which checkpoint is running with `docker inspect -f '{{.Config.Cmd}}' qwen38-flash-next-tf`: the path after `serve` names it. `DRY_RUN=1 CHECKPOINT=int4 ./start.sh`
+prints what a start would do (the model, the memory it needs and the docker command) without stopping or starting anything. To serve a different model directory of the same
+format, set `MODEL_ID` (and `MODEL_REVISION`, or leave it empty for the latest) instead of `CHECKPOINT`. A `MODEL_ID` set by hand takes no preset revision pin.
+
 ## Images and video
 
 The model's own vision tower (27 layers, 0.84 GiB, from the same checkpoint) turns images and video frames into
