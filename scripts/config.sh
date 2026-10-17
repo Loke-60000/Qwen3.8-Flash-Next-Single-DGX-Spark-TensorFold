@@ -98,6 +98,10 @@ export TF_FLASHNEXT_PREFILL_TAIL="${TF_FLASHNEXT_PREFILL_TAIL:-512}"
 # through a 64-pair tile kernel that gives bit-identical results to the older kernels and cold prefill +14% (16k prompt).
 # 2 = gate/up and down, 1 = gate/up only, 0 = the older kernels. (Decode and chunks under 1024 rows are not affected.)
 export TF_FLASHNEXT_PROMPT_EXPERT_TILE="${TF_FLASHNEXT_PROMPT_EXPERT_TILE:-2}"
+# Fair prefill (patch 0015), OFF by default: with several long prompts queued, prompts are filled in slices, shortest first,
+# so a short request waits ~2 s (not minutes) behind five 100k prompts and running decoders keep a ~0.15 s gap. Costs ~20% on
+# the total time of a mixed load (five 100k prompts + shorts: 280 s -> 342 s); idle prefill is unchanged. One rank only.
+# Opt in: TF_FLASHNEXT_FILL_FAIR=1 (TF_FLASHNEXT_FILL_LAYERS slice size, default 2; TF_FLASHNEXT_FILL_AGING rows, default 1024).
 # KV cache (--kv-dtype). fp8 is the default: about 1.84x the pool of bf16, and lossy (~98.8% top-1 agreement with a
 # bf16 cache, so a free-running reply can differ). bf16 is exact: KV_DTYPE=bf16. FP8 works together with --vision.
 KV_DTYPE="${KV_DTYPE:-fp8}"
