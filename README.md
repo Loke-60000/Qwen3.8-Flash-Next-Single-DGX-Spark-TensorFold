@@ -11,8 +11,7 @@
 > [`nvidia/Qwen3.8-Flash-Next-FP4-Local`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local): NVIDIA trained the
 > NVFP4 and MXFP8 weights against the bf16 model as teacher, so the 4-bit weights are tuned to match it. On NVIDIA's own
 > numbers it scores 91.5% on GPQA Diamond and 88.7% on ToolEvalBench against 92.2% and 89.4% for bf16 (model card, not
-> measured here). The Zig engine support for this checkpoint is in progress in this branch; the measured tables further
-> down are for the INT4-AutoRound checkpoint (`CHECKPOINT=int4`) until the NVIDIA ones are re-measured.
+> measured here). It is what `./start.sh` serves; the [performance](#performance) numbers below are for it.
 
 Serve **Qwen3.8 Flash Next** from a single NVIDIA DGX Spark (GB10, 128 GB) through an OpenAI-compatible API. It runs
 [TensorFold](https://github.com/ashhart/TensorFold)'s Zig engine, `tensorfold-native` (branch
@@ -80,56 +79,57 @@ is unchanged.
 
 ## Performance
 
+Numbers for the default checkpoint, **`nvidia/Qwen3.8-Flash-Next-FP4-Local`** (NVIDIA's QAD FP4 export), as `./start.sh` serves it: 262,144-token
+window, 5 requests at once, fp8 KV, vision on, MTP drafts. One DGX Spark (GB10), measured with
+[sparkDash](https://github.com/MiaAI-Lab/sparkDash)'s Decode and Prefill benchmarks, running on the same Spark as the server (no network between
+them), 400 tokens a request. Aggregate is the sum of the per-request decode speeds; TTFT is the time to the first token.
+
+**Decode, prose**
+
+| Concurrent requests | Aggregate | Per request | TTFT |
+| ---: | ---: | ---: | ---: |
+| 1 | 46.2 tok/s | 46.2 tok/s | 190 ms |
+| 2 | 72.8 tok/s | 37.6 tok/s | 177 ms |
+| 3 | 88.1 tok/s | 30.8 tok/s | 220 ms |
+| 4 | 106.5 tok/s | 28.0 tok/s | 244 ms |
+| 5 | 132.1 tok/s | 27.6 tok/s | 258 ms |
+
+**Decode, code**
+
+| Concurrent requests | Aggregate | Per request | TTFT |
+| ---: | ---: | ---: | ---: |
+| 1 | 66.7 tok/s | 66.7 tok/s | 178 ms |
+| 2 | 101.9 tok/s | 51.9 tok/s | 339 ms |
+| 3 | 117.8 tok/s | 41.2 tok/s | 291 ms |
+| 4 | 133.7 tok/s | 35.2 tok/s | 386 ms |
+| 5 | 150.1 tok/s | 31.9 tok/s | 325 ms |
+
+**Prefill** (cold prompts, no prompt-cache hit)
+
+| Prompt tokens | Prefill | TTFT |
+| ---: | ---: | ---: |
+| 4,131 | 2,325 tok/s | 1.95 s |
+| 8,228 | 2,259 tok/s | 3.82 s |
+| 16,418 | 2,191 tok/s | 7.67 s |
+| 32,807 | 2,123 tok/s | 15.63 s |
+| 65,576 | 2,056 tok/s | 32.07 s |
+| 131,111 | 1,947 tok/s | 67.52 s |
+
+A repeat run of the same benchmark moved single-stream prose by up to 15% (55.0 and 46.2 tok/s on the first and last runs, same settings); the
+other points agreed within 2 tok/s. Run sparkDash on the Spark itself: from another machine over a slow link it adds the link's round trip to every
+TTFT (about 1.1 s over a 387 ms Tailscale path in our test) and staggers the requests, which lowers the multi-stream numbers.
+
+Against our earlier Python-engine build of the same checkpoint (measured the same way on another Spark: prose 54.4, 81.3, 88.5, 101.6 and 123.1 tok/s aggregate
+at 1 to 5 requests; code 84.9, 128.3, 142.3, 159.5 and 181.9; prefill 2,315 tok/s at 4k down to 1,889 at 128k), prefill is level and ahead from 64k.
+Decode is behind it at one and two streams, level at three and ahead at four and five on prose, and 15 to 21% behind on code, because the CUDA path of
+this engine drafts with the MTP head only (no copy drafter for code).
+
+### Measured with `tools/bench_streams.py`
+
 Measured on a DGX Spark (GB10, 121 GiB, 115 GiB available) with the NVIDIA FP4 checkpoint, the Zig engine built from `patches/`,
 `./start.sh` defaults (262,144-token window, 5 requests, fp8 KV, vision on, MTP drafts), greedy, thinking off, 256 tokens a
 request, median of 3. The "Total" column is the sum of the per-request decode speeds the server reports. The Python recipe
 numbers are our earlier Python build of the same checkpoint (patches 0003-0006), not the INT4-AutoRound recipe, measured on the same machine.
-
-### Measured with sparkDash
-
-[sparkDash](https://github.com/MiaAI-Lab/sparkDash)'s own Decode and Prefill benchmarks, run on the same Spark that serves the model (sparkDash
-installed there, the Spark added as a local unit, so there is no network between the benchmark and the server), `./start.sh` defaults, 400 tokens
-a request, prose and code prompts at 1 to 5 concurrent requests, then prefill from 4k to 128k. Total is the sum of the per-request decode speeds.
-The "earlier Python build" column is our Python-engine build of the same checkpoint, measured the same way on another Spark.
-
-**Decode, prose**
-
-| Concurrent requests | Total | Per request | TTFT | Earlier Python build, total |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 46.2 tok/s | 46.2 | 190 ms | 54.4 |
-| 2 | 72.8 tok/s | 37.6 | 177 ms | 81.3 |
-| 3 | 88.1 tok/s | 30.8 | 220 ms | 88.5 |
-| 4 | 106.5 tok/s | 28.0 | 244 ms | 101.6 |
-| 5 | 132.1 tok/s | 27.6 | 258 ms | 123.1 |
-
-**Decode, code**
-
-| Concurrent requests | Total | Per request | TTFT | Earlier Python build, total |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 66.7 tok/s | 66.7 | 178 ms | 84.9 |
-| 2 | 101.9 tok/s | 51.9 | 339 ms | 128.3 |
-| 3 | 117.8 tok/s | 41.2 | 291 ms | 142.3 |
-| 4 | 133.7 tok/s | 35.2 | 386 ms | 159.5 |
-| 5 | 150.1 tok/s | 31.9 | 325 ms | 181.9 |
-
-**Prefill** (cold prompts, no prompt-cache hit)
-
-| Prompt tokens | Prefill | TTFT | Earlier Python build |
-| ---: | ---: | ---: | ---: |
-| 4,131 | 2,325 tok/s | 1.95 s | 2,315 tok/s |
-| 8,228 | 2,259 tok/s | 3.82 s | 2,290 |
-| 16,418 | 2,191 tok/s | 7.67 s | 2,273 |
-| 32,807 | 2,123 tok/s | 15.63 s | 2,199 |
-| 65,576 | 2,056 tok/s | 32.07 s | 2,049 |
-| 131,111 | 1,947 tok/s | 67.52 s | 1,889 |
-
-Prefill is level with the earlier Python build (ahead from 64k). Decode is behind it at one and two streams, level at three and ahead at four and
-five on prose, and 15 to 21% behind on code, because the CUDA path of this engine drafts with the MTP head only (no copy drafter for code).
-A repeat run of the same benchmark moved single-stream prose by up to 15% (55.0 and 46.2 tok/s on the first and last runs, the same settings);
-the other points agreed within 2 tok/s. sparkDash run from another Spark over a slow link adds the link's round trip to every TTFT (about 1.1 s in our
-test over a 387 ms Tailscale path) and staggers the requests, so run it on the Spark itself.
-
-### Measured with `tools/bench_streams.py`
 
 **Decode, prose** (Zig measured on the guest Spark with `tools/bench_streams.py`; the Python column is our earlier Python build of the same checkpoint, measured on the same machine with the same tool)
 
