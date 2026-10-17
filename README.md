@@ -47,7 +47,7 @@ them), 400 tokens a request. Aggregate is the sum of the per-request decode spee
 
 | Concurrent requests | Aggregate | Per request | TTFT |
 | ---: | ---: | ---: | ---: |
-| 1 | 46.2 tok/s | 46.2 tok/s | 190 ms |
+| 1 | 46–55 tok/s (varies) | 46–55 tok/s | 190 ms |
 | 2 | 72.8 tok/s | 37.6 tok/s | 177 ms |
 | 3 | 88.1 tok/s | 30.8 tok/s | 220 ms |
 | 4 | 106.5 tok/s | 28.0 tok/s | 244 ms |
@@ -74,7 +74,7 @@ them), 400 tokens a request. Aggregate is the sum of the per-request decode spee
 | 65,576 | 2,056 tok/s | 32.07 s |
 | 131,111 | 1,947 tok/s | 67.52 s |
 
-A repeat run of the same benchmark moved single-stream prose by up to 15% (55.0 and 46.2 tok/s on the first and last runs, same settings); the
+Single-stream prose varies from run to run, 46 to 55 tok/s with the same settings (46.2, 46.9 and 55.0 tok/s in three runs, about 15%); the
 other points agreed within 2 tok/s. Run sparkDash on the Spark itself: from another machine over a slow link it adds the link's round trip to every
 TTFT (about 1.1 s over a 387 ms Tailscale path in our test) and staggers the requests, which lowers the multi-stream numbers.
 
