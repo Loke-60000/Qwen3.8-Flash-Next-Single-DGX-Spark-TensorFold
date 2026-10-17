@@ -11,7 +11,14 @@ license files from the pinned checkout.
   and its MTP head. Its license, the
   [Qwen Community License 1.0](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE), comes with the
   weights.
-- **azampatti** ([azampatti](https://huggingface.co/azampatti)): the checkpoint this recipe serves,
+- **NVIDIA** ([nvidia](https://huggingface.co/nvidia)): the checkpoint this recipe serves by default,
+  [`nvidia/Qwen3.8-Flash-Next-FP4-Local`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local): Qwen3.8 Flash Next quantized with
+  quantization-aware distillation (QAD) against the bf16 model as teacher, using NVIDIA Model Optimizer: NVFP4 routed experts with CSF-compressed
+  scale factors, MXFP8 attention, DeltaNet and shared-expert linears, an NVFP4 n-gram table and quantized MTP and vision towers. On NVIDIA's own
+  numbers it scores 91.5% on GPQA Diamond and 88.7% on ToolEvalBench against 92.2% and 89.4% for bf16 (its model card, not measured here). Used under the
+  [NVIDIA Open Model Agreement](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-agreement/); the base model's
+  Qwen Community License 1.0 applies as well.
+- **azampatti** ([azampatti](https://huggingface.co/azampatti)): the optional INT4 checkpoint (`CHECKPOINT=int4`),
   [`azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound`](https://huggingface.co/azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound):
   azampatti authored its top-5 expert cut, the shared-expert healing, and the checkpoint. Under the license on
   its model card (the Qwen license).
@@ -36,6 +43,10 @@ license files from the pinned checkout.
   The Flash Next CUDA engine in this recipe is ported from TensorFold's Python Flash Next CUDA engine, written by
   Ash Hart and the TensorFold contributors ([contributors](https://github.com/ashhart/TensorFold/graphs/contributors));
   their authorship is recorded in TensorFold's history.
+- **NVIDIA FP4 support in the Zig engine** (`patches/0011` to `0013`): by MiaAI-Lab, as a port of TensorFold's Python implementation of the same
+  formats (CSF scale decoding, MXFP8 linears, the NVFP4 n-gram table and its read-ahead), written by the TensorFold Contributors, to the Zig engine
+  and its CUDA kernels. The Python kernels it mirrors are copied into the engine's kernel directory and pinned to their sources by
+  `zig/tests/cuda/copies.py`; the engine's own new files say "Written for TensorFold by TensorFold Contributors".
 - **The Zig CUDA serving path and the CUDA family registry** were authored by Jürgen Schmied
   ([jschmied](https://github.com/jschmied)) in [TensorFold PR #443](https://github.com/ashhart/TensorFold/pull/443)
   (commit [`59e77e8`](https://github.com/ashhart/TensorFold/commit/59e77e8f4b875ce0e863a8c896fc8e424bc539ac)):
@@ -86,6 +97,7 @@ This recipe no longer applies those patches (the serving path is the Zig engine)
   [PR #2](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Dual-DGX-Sparks-TensorFold/pull/2)): admission counted the draft
   window against `--context`, so a prompt plus `max_tokens` equal to the window was refused. The engine already keeps
   those rows beyond the window. The admission change in the engine patches and `tools/context_boundary.py` are theirs.
+- **[sparkDash](https://github.com/MiaAI-Lab/sparkDash)** by MiaAI-Lab: the Decode and Prefill benchmarks the README's performance numbers were measured with.
 - The scripts (`start.sh`, `stop.sh`, `scripts/`) and the checks in `tools/` are MiaAI-Lab's. `client.py`,
   `needle.py`, `toolcheck.py` and `prompt_reuse.py` are adapted from MiaAI-Lab's two-Spark recipe
   [GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold);

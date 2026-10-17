@@ -316,15 +316,18 @@ One token's cache at TP=1, 13 layers (12 attention plus the MTP head):
 FP8 stores keys with both scales and values as codes. The indexer key (256 bytes) and pooled blocks (64 bytes) stay
 bf16. A 1,048,576-token fp8 sequence is 17.46 GiB; the same window in bf16 is 30.06 GiB.
 
-Weights, including the FP8 n-gram table, measured 65.7 GiB on this engine at TP=1. After they load, the engine's
-sequence budget is `MemAvailable` minus 10 GiB (`TENSORFOLD_MEMORY_RESERVE_GIB`). With `VISION=1` it also keeps 2 GiB
-for the helper (`TENSORFOLD_VISION_WORKSPACE_MIB`; the tower peaks around 0.9–1.7 GiB). The pool is shared and streams
-grow as they go. A request is admitted when its prompt plus its reply budget (`max_tokens`) fits beside the others;
-one that does not fit is refused, not queued. On the spark4 boot above, with vision on, the engine reported
-**30.22 GiB** of sequence memory. A full fp8 window is 4.37 GiB, so **six** streams can sit at 262,144 tokens at once
-(26.2 GiB) and a seventh (30.6 GiB) does not fit. `PARALLEL` 8 is the cap: shorter requests share the pool, and a
-full window past the sixth is refused. A pool probe with the helper not resident held 36.22 GiB and fit eight full
-windows. `VISION=0` returns the 2 GiB helper workspace to the pool.
+**Total available KV cache with the default checkpoint (NVIDIA FP4): 24.36 GiB, about 1.46 million fp8 tokens.** That is the shared sequence
+pool the engine reported on a Spark with about 116 GiB of memory available at start, vision on, `PARALLEL=5` (the server log line `sequence memory`).
+Loading the weights takes about 81 GiB of that memory (the 26.8 GiB NVFP4 n-gram table is read from disk by the host, in the page cache, not held on the
+GPU). The engine's sequence budget is `MemAvailable` after the weights load, minus `TENSORFOLD_MEMORY_RESERVE_GIB` (10 GiB), and with `VISION=1` minus 2 GiB kept for
+the helper (`TENSORFOLD_VISION_WORKSPACE_MIB`; the tower peaks around 0.9–1.7 GiB). A full fp8 window is 4.37 GiB, so **five** streams can sit at 262,144
+tokens at once (21.9 GiB) and a sixth (26.2 GiB) does not fit; shorter requests share the pool. The pool is shared and streams grow as they go. A
+request is admitted when its prompt plus its reply budget (`max_tokens`) fits beside the others; one that does not fit is refused, not queued. The pool
+follows the free memory at start (other containers on the machine shrink it), and each GiB less reserve adds a GiB to it. `VISION=0` returns the 2 GiB helper
+workspace to the pool. Under a mixed load of five 100k-token prompts and six short ones, system memory in use peaked at 98.6 GiB.
+
+With `CHECKPOINT=int4` the weights, including the FP8 n-gram table on the GPU, measured 65.7 GiB, and the engine reported **30.22 GiB** of sequence memory
+on a Spark with more memory free (six full fp8 windows; a seventh did not fit). A pool probe with the helper not resident held 36.22 GiB and fit eight full windows.
 
 A 1,048,576-token window (`CONTEXT=1048576`, YaRN factor 4) is one 17.46 GiB fp8 cache on top of the weights. A prompt
 that fills that window also needs prefill scratch, which the engine's budget does not reserve. It is not the default.
@@ -374,7 +377,7 @@ Every setting lives in [`scripts/config.sh`](scripts/config.sh). Override it fro
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `PARALLEL` | `8` | requests decoded together. One that would not fit (prompt plus `max_tokens`) is refused |
+| `PARALLEL` | `5` | requests decoded together. One that would not fit (prompt plus `max_tokens`) is refused |
 | `CONTEXT` | `262144` | prompt + reply window. `1048576` turns on YaRN factor 4 |
 | `DRAFTS` | `1` | MTP drafts; `0` passes `--no-drafts` |
 | `TF_FLASHNEXT_DEPTH` | `6` | drafts a round. The stop rule is the engine's hybrid (see `TF_FLASHNEXT_PRODUCT_STREAMS`) |
@@ -394,9 +397,11 @@ Every setting lives in [`scripts/config.sh`](scripts/config.sh). Override it fro
 | `TF_FLASHNEXT_REPEAT_CACHE` | `1` | a prompt the server has served before keeps a state one token short of its end, so a repeat prefills one row (63-token prompt: TTFT 170 ms to 70 ms). `0` turns it off |
 | `TF_FLASHNEXT_ADMIT_WAIT_MS` | `3` | an idle server waits this long after a first request for others sent with it, so a burst prefills in one pass and decodes in step |
 | `TF_FLASHNEXT_PREFILL_TAIL` | `512` | a short last prompt chunk joins the previous one |
-| `MODEL_REVISION` | `14642741…` | the checkpoint commit this recipe serves |
+| `CHECKPOINT` | `nvfp4` | `nvfp4` serves `nvidia/Qwen3.8-Flash-Next-FP4-Local`; `int4` serves azampatti's INT4-AutoRound (sets its model id and revision). `MODEL_ID` / `MODEL_REVISION` override either |
+| `MODEL_REVISION` | `b9ce18a6…` | the checkpoint commit this recipe serves (`14642741…` with `CHECKPOINT=int4`) |
 
-The Python recipe's int8 KV and SSD n-gram reader are gone. KV is fp8 (or bf16), and the n-gram table is on the GPU.
+The Python recipe's int8 KV is gone: KV is fp8 (or bf16). The NVIDIA checkpoint's NVFP4 n-gram table (26.8 GiB) is read from disk by the host
+(`TF_NGRAM_READ=pread` by default, with read-ahead of the next prompt chunk; `TF_FLASHNEXT_WARM_AHEAD=0` turns that off). The INT4 checkpoint's FP8 table is on the GPU.
 
 ### Thinking and sampling
 
@@ -428,7 +433,9 @@ the model was still thinking.
 
 `patches/*.patch` is the Zig Flash Next CUDA engine against TensorFold `db281878` (the `zig-flashnext` pin), applied
 with `git apply` in the checkout root. They are the engine, not speed patches on a Python package. Drafts are still
-checked: a drafted reply matches `"draft": false`.
+checked: a drafted reply matches `"draft": false`. `0011` to `0013` are this recipe's own: `0011` lets the vision helper load the NVIDIA
+checkpoint's quantized tower, `0012` makes the Zig engine serve the NVIDIA FP4 checkpoint (config, CSF-compressed expert scales, MXFP8 linears, the
+NVFP4 n-gram table with read-ahead) and `0013` tunes decoding (draft depth 6, the repeat-prompt cache, burst admission).
 
 ## Checks
 
@@ -461,7 +468,9 @@ NOTICE        third-party notices
 ## License
 
 MIT, see [`LICENSE`](LICENSE). The model weights, downloaded from Hugging Face and not part of this repository, are
-under the Qwen Community License 1.0, and the checkpoint under the license on its model card (NVIDIA Open Model Agreement for the NVIDIA FP4 checkpoint).
+under the checkpoint's own license: the default NVIDIA FP4 checkpoint under the
+[NVIDIA Open Model Agreement](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-agreement/) (its base model, Qwen3.8 Flash Next, is under the
+Qwen Community License 1.0), and the optional INT4 checkpoint under the Qwen Community License 1.0 per its model card.
 
 **Third-party software in the image.** The image `scripts/prepare.sh` builds is based on NVIDIA's PyTorch container
 `nvcr.io/nvidia/pytorch:26.07-py3`, redistributed as a value-added runtime image. The NVIDIA software in it is
@@ -494,4 +503,6 @@ checkpoint was by [Vontra](https://huggingface.co/Vontra).
 [321sssrt-bit](https://github.com/321sssrt-bit) authored the full-window admission fix and `tools/context_boundary.py`
 ([issue #1](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Dual-DGX-Sparks-TensorFold/issues/1),
 [PR #2](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Dual-DGX-Sparks-TensorFold/pull/2)).
+The NVIDIA FP4 checkpoint support in the Zig engine (patches 0011 to 0013) is MiaAI-Lab's work, built on TensorFold's Python implementation of the same
+formats by the TensorFold Contributors. The performance numbers were measured with [sparkDash](https://github.com/MiaAI-Lab/sparkDash) by MiaAI-Lab.
 The full list is in [`CREDITS.md`](CREDITS.md).

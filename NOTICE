@@ -51,11 +51,15 @@ Zig
   TensorFold's Zig engine; the compiler is used in the build stage only and is not part of the published image.
 
 Model files (downloaded from Hugging Face by scripts/prepare.sh; not included in this repository or its image)
-  The checkpoint this recipe serves, azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound, is by azampatti (the
+  The checkpoint this recipe serves by default, nvidia/Qwen3.8-Flash-Next-FP4-Local, is NVIDIA's quantization-aware-distilled
+  FP4 export (NVIDIA Model Optimizer) of Qwen/Qwen3.8-Flash-Next by the Qwen team (Alibaba). Its use is governed by the NVIDIA Open
+  Model Agreement (https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-agreement/); the base model is under the
+  Qwen Community License 1.0 (https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE).
+  The optional checkpoint (CHECKPOINT=int4), azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound, is by azampatti (the
   top-5 expert cut and the shared-expert healing), built on Intel's AutoRound int4 quantization
   (Intel/Qwen3.8-Flash-Next-W4A16-AutoRound) and on Saren-Arterius's hybrid checkpoint and FP8 n-gram table
-  (Saren/Qwen3.8-Flash-Next-ple-table-fp8), of Qwen/Qwen3.8-Flash-Next by the Qwen team (Alibaba). Per its model card,
-  it is under the Qwen license (https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE).
+  (Saren/Qwen3.8-Flash-Next-ple-table-fp8), of Qwen/Qwen3.8-Flash-Next. Per its model card, it is under the Qwen license
+  (https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE).
 
 Third-party software in the image
   The image scripts/prepare.sh builds is based on NVIDIA's PyTorch container nvcr.io/nvidia/pytorch:26.07-py3,
