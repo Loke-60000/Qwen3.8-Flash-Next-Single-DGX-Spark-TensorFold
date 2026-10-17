@@ -190,6 +190,77 @@ the Python token at 2,270 of 2,295 positions (98.9%); the disagreements are near
 (`tools/teacher_force.py` is not part of this recipe; see the lab notes). `tools/toolcheck.py` and `tools/visioncheck.py` pass.
 Greedy free-running output differs from the Python build after 85 to 350 characters in six of seven prompts for that reason.
 
+### Optional INT4-AutoRound checkpoint (`CHECKPOINT=int4`)
+
+These are the numbers the recipe published for the INT4-AutoRound checkpoint (azampatti), measured with the Zig engine before the NVIDIA FP4
+support (patches 0011 to 0013) was added. They are for `CHECKPOINT=int4`, not for the default checkpoint above. The "Python recipe" they
+mention is the older recipe on the MLX 4-bit checkpoint.
+
+Measured with sparkDash on spark4, 2026-10-08, engine `20e709a` (image `tensorfold-qwen38:zig-db28187`, patches `d84d7cc22655`): FP8 KV, vision on, `PARALLEL` 8, a 262,144-token window. Greedy, thinking off. Aggregate is every stream's tokens over the time from the first token of the earliest stream to the last token of the latest. The FP8 n-gram table is on the GPU, and MTP drafts are checked against the model's own sample.
+
+**Decode, prose** (sparkDash)
+
+| Concurrent requests | Aggregate | Per request | Time to first token |
+| ---: | ---: | ---: | ---: |
+| 1 | 64.4 tok/s | 64.4 tok/s | 98 ms |
+| 2 | 89.0 tok/s | 46.4 tok/s | 180 ms |
+| 4 | 140.7 tok/s | 37.2 tok/s | 216 ms |
+| 8 | 200.9 tok/s | 26.7 tok/s | 405 ms |
+
+Against the Python recipe's prose table (62.4 / 90.5 / 106.7 / 119.3 at 1 / 2 / 4 / 5), one request is 64.4 against 62.4 and four are 140.7 against 106.7. Two requests are 89.0 against 90.5. Eight requests are 200.9; the Python recipe's five-request row was 119.3.
+
+**Prefill** (sparkDash, one request)
+
+| Prompt | Tokens | Prefill speed | Time to first token |
+| ---: | ---: | ---: | ---: |
+| 4k | 4,134 | 2,526 tok/s | 1.64 s |
+| 8k | 8,232 | 2,606 tok/s | 3.16 s |
+| 16k | 16,422 | 2,643 tok/s | 6.21 s |
+| 32k | 32,804 | 2,630 tok/s | 12.47 s |
+| 64k | 65,578 | 2,564 tok/s | 25.57 s |
+| 128k | 131,111 | 2,415 tok/s | 54.30 s |
+
+Against the Python recipe's prefill (2,503 / 2,520 / 2,499 / 2,414 / 2,200 at 8k / 16k / 32k / 64k / 128k), this boot is ahead at each of those sizes.
+
+A 199,730-token needle on this boot was found (prefill 100.2 s). One 320×240 image took 0.22 s to the first token (99 prompt tokens), ten of them 0.65 s (836 tokens), and a 30-second 320×240 video 2.02 s (2,678 tokens).
+
+**Decode, code** (lab bench on the same boot: a short Python function, 256 tokens, end-of-sequence ignored)
+
+| Concurrent requests | Aggregate | Per request | Time to first token |
+| ---: | ---: | ---: | ---: |
+| 1 | 57.5 tok/s | 57.5 tok/s | 113 ms |
+| 2 | 92.7 tok/s | 73.9 tok/s | 166 ms |
+| 4 | 130.8 tok/s | 49.6 tok/s | 194 ms |
+| 8 | 189.3 tok/s | 40.1 tok/s | 379 ms |
+
+The tables below are the earlier bf16, text-only boot.
+The previous Python recipe on the MLX 4-bit checkpoint (int8 KV, n-gram tables read from SSD) measured prose decode at
+62.4 / 90.5 / 106.7 / 119.3 tok/s for 1 / 2 / 4 / 5 requests, and prefill at 2,503 / 2,520 / 2,499 / 2,414 / 2,200
+tok/s for 8k / 16k / 32k / 64k / 128k.
+
+**Decode, prose** (sparkDash, 2026-10-07, spark4, engine `6eb39c1`: greedy, thinking off, the hash-map prompt). That boot reported 33.28 GiB of sequence memory.
+
+| Concurrent requests | Aggregate | Per request | Time to first token |
+| ---: | ---: | ---: | ---: |
+| 1 | 63.3 tok/s | 63.3 tok/s | 101 ms |
+| 2 | 95.4 tok/s | 49.0 tok/s | 162 ms |
+| 3 | 118.5 tok/s | 43.2 tok/s | 227 ms |
+| 4 | 148.6 tok/s | 39.7 tok/s | 275 ms |
+
+Against the Python recipe's prose table, one request is 63.3 against 62.4, two are 95.4 against 90.5, and four are 148.6 against 106.7. The Python recipe's five-request row was 119.3 tok/s; this run stopped at four, the number of full windows the cache budget holds.
+
+**Prefill** (same boot, one request, greedy, thinking off)
+
+| Prompt | Tokens | Prefill speed | Time to first token |
+| ---: | ---: | ---: | ---: |
+| ~8k | 6,574 | 768 tok/s | 8.57 s |
+| ~16k | 13,107 | 1,300 tok/s | 10.09 s |
+| ~32k | 26,209 | 1,678 tok/s | 15.62 s |
+| ~64k | 52,386 | 1,971 tok/s | 26.57 s |
+| ~128k | 104,775 | 1,991 tok/s | 52.63 s |
+
+The 6,574-token row is the first long prefill after load. The later rows are 1,300 to 1,991 tok/s, under the Python recipe's 2,200-2,520. A 199,730-token needle on the same boot prefilled in 123.1 s (1,623 tok/s) and the passphrase was found.
+
 ## Requirements
 
 - A DGX Spark (or another GB10 system with 128 GB unified memory) with nothing else large on the GPU. The default
