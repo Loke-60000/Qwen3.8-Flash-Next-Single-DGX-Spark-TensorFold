@@ -85,7 +85,7 @@ other points agreed within 2 tok/s. Run sparkDash on the Spark itself: from anot
 TTFT (about 1.1 s over a 387 ms Tailscale path in our test) and staggers the requests, which lowers the multi-stream numbers.
 
 Against our earlier Python-engine build of the same checkpoint (measured the same way on another Spark: prose 54.4, 81.3, 88.5, 101.6 and 123.1 tok/s aggregate
-at 1 to 5 requests; code 84.9, 128.3, 142.3, 159.5 and 181.9; prefill 2,315 tok/s at 4k down to 1,889 at 128k), prefill is level and ahead from 64k.
+at 1 to 5 requests; code 84.9, 128.3, 142.3, 159.5 and 181.9; prefill 2,315 tok/s at 4k down to 1,889 at 128k), prefill is now ahead at every size.
 Decode is behind it at one and two streams, level at three and ahead at four and five on prose, and 15 to 21% behind on code, because the CUDA path of
 this engine drafts with the MTP head only (no copy drafter for code).
 
