@@ -43,10 +43,10 @@ license files from the pinned checkout.
   The Flash Next CUDA engine in this recipe is ported from TensorFold's Python Flash Next CUDA engine, written by
   Ash Hart and the TensorFold contributors ([contributors](https://github.com/ashhart/TensorFold/graphs/contributors));
   their authorship is recorded in TensorFold's history.
-- **NVIDIA FP4 support in the Zig engine** (`patches/0011` to `0013`): by MiaAI-Lab, as a port of TensorFold's Python implementation of the same
+- **NVIDIA FP4 support in the Zig engine** (`patches/0011` to `0015`): by MiaAI-Lab, as a port of TensorFold's Python implementation of the same
   formats (CSF scale decoding, MXFP8 linears, the NVFP4 n-gram table and its read-ahead), written by the TensorFold Contributors, to the Zig engine
   and its CUDA kernels. The Python kernels it mirrors are copied into the engine's kernel directory and pinned to their sources by
-  `zig/tests/cuda/copies.py`; the engine's own new files say "Written for TensorFold by TensorFold Contributors".
+  `zig/tests/cuda/copies.py`; the engine's own new files say "Written for TensorFold by TensorFold Contributors". The prompt expert tile kernel (`patches/0014`) follows the staging idea of the earlier Python engine's expert kernel; its header credits the TensorFold Contributors.
 - **The Zig CUDA serving path and the CUDA family registry** were authored by Jürgen Schmied
   ([jschmied](https://github.com/jschmied)) in [TensorFold PR #443](https://github.com/ashhart/TensorFold/pull/443)
   (commit [`59e77e8`](https://github.com/ashhart/TensorFold/commit/59e77e8f4b875ce0e863a8c896fc8e424bc539ac)):
