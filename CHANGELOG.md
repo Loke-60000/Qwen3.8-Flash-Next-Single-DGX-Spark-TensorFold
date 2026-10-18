@@ -5,6 +5,25 @@ Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:
 
 ## Unreleased
 
+**Faster prompt prefill on the NVIDIA FP4 checkpoint (+13 to 15%), and an opt-in fair prefill for mixed loads.**
+
+- `patches/0014-engine-prompt-expert-tile.patch`: the routed experts of prompt chunks of 1,024 rows or more run through a new shared-memory kernel
+  (`fn_experts_tile.cu`: 64 token-expert pairs a CTA, activations staged once in shared memory, weights by `cp.async`; same arithmetic and rounding as the
+  older kernels, so the output bits are identical). On by default: `TF_FLASHNEXT_PROMPT_EXPERT_TILE=2` (gate/up and down; `1` gate/up only; `0` the older
+  kernels); `scripts/config.sh` exports it. Two ranks keep the older kernels unless it is set. Decode and chunks under 1,024 rows are untouched.
+  Paired alternating runs, tile off and on, 3 server starts each, median of 3 prompts: 4k 2,090 to 2,397 tok/s (+14.7%), 16k 2,174 to 2,474 (+13.8%),
+  32k 2,161 to 2,450 (+13.4%). sparkDash: 4k 2,325 to 2,665 tok/s, 16k 2,191 to 2,501, 128k 1,947 to 2,197. Five 100k-token prompts in 250 s (265 s).
+- `patches/0015-engine-fair-prefill.patch`, off by default (`TF_FLASHNEXT_FILL_FAIR=1`; `TF_FLASHNEXT_FILL_LAYERS`, `TF_FLASHNEXT_FILL_AGING`): prompts are
+  filled in two-layer slices, one owner of the prompt buffers handed on at chunk boundaries, shortest prompt first with aging. Five 100k prompts, a running
+  decoder and a short request every 20 s: shorts wait 1.8 s median and 3.9 s worst (187 s and 256 s before), the decoder's longest gap 0.27 s (12 to 15 s per
+  long prompt, up to 218 s). Costs about 20% of the total time of such a mixed load; idle prefill is unchanged. One rank only. The unit tests compile again
+  (the round-log commit had broken `zig build test`).
+- Checks on the default build (tile on): the 7-prompt greedy test has the same token hashes as before (and as with the tile off), drafted equal to
+  `"draft": false` and concurrent equal to serial (`tools/exact.py`), teacher-forced 2,270 of 2,295 (98.91%), `tools/toolcheck.py` 3/3, `tools/visioncheck.py`,
+  a 194,723-token needle (prefill 99.4 s), five 100k prompts plus six shorts without a crash or hang, all answers right. With `TF_FLASHNEXT_FILL_FAIR=1`:
+  the same 7-prompt hashes, exact.py, toolcheck, visioncheck and needle pass, no `PromptBuffersBusy`.
+- README Performance tables re-measured with sparkDash on the final build; decode is unchanged (prose 1 stream 48.5 tok/s, 5 streams 132.7; code 67.9 and 149.7).
+
 **The default checkpoint is now NVIDIA's QAD FP4 export; INT4-AutoRound is optional.**
 
 - `./start.sh` serves `nvidia/Qwen3.8-Flash-Next-FP4-Local` (NVIDIA's quantization-aware-distilled FP4 checkpoint, close to bf16: 91.5% GPQA Diamond and
