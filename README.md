@@ -47,34 +47,40 @@ them), 400 tokens a request. Aggregate is the sum of the per-request decode spee
 
 | Concurrent requests | Aggregate | Per request | TTFT |
 | ---: | ---: | ---: | ---: |
-| 1 | 46–55 tok/s (varies) | 46–55 tok/s | 190 ms |
-| 2 | 72.8 tok/s | 37.6 tok/s | 177 ms |
-| 3 | 88.1 tok/s | 30.8 tok/s | 220 ms |
-| 4 | 106.5 tok/s | 28.0 tok/s | 244 ms |
-| 5 | 132.1 tok/s | 27.6 tok/s | 258 ms |
+| 1 | 46–55 tok/s (varies) | 46–55 tok/s | 195 ms |
+| 2 | 73.5 tok/s | 38.1 tok/s | 204 ms |
+| 3 | 90.3 tok/s | 31.2 tok/s | 218 ms |
+| 4 | 106.4 tok/s | 27.9 tok/s | 243 ms |
+| 5 | 132.7 tok/s | 27.7 tok/s | 266 ms |
 
 **Decode, code**
 
 | Concurrent requests | Aggregate | Per request | TTFT |
 | ---: | ---: | ---: | ---: |
-| 1 | 66.7 tok/s | 66.7 tok/s | 178 ms |
-| 2 | 101.9 tok/s | 51.9 tok/s | 339 ms |
-| 3 | 117.8 tok/s | 41.2 tok/s | 291 ms |
-| 4 | 133.7 tok/s | 35.2 tok/s | 386 ms |
-| 5 | 150.1 tok/s | 31.9 tok/s | 325 ms |
+| 1 | 67.9 tok/s | 67.9 tok/s | 181 ms |
+| 2 | 100.1 tok/s | 51.3 tok/s | 330 ms |
+| 3 | 117.1 tok/s | 41.1 tok/s | 315 ms |
+| 4 | 131.2 tok/s | 34.8 tok/s | 323 ms |
+| 5 | 149.7 tok/s | 31.9 tok/s | 324 ms |
 
 **Prefill** (cold prompts, no prompt-cache hit)
 
 | Prompt tokens | Prefill | TTFT |
 | ---: | ---: | ---: |
-| 4,131 | 2,325 tok/s | 1.95 s |
-| 8,228 | 2,259 tok/s | 3.82 s |
-| 16,418 | 2,191 tok/s | 7.67 s |
-| 32,807 | 2,123 tok/s | 15.63 s |
-| 65,576 | 2,056 tok/s | 32.07 s |
-| 131,111 | 1,947 tok/s | 67.52 s |
+| 4,136 | 2,665 tok/s | 1.73 s |
+| 8,230 | 2,583 tok/s | 3.36 s |
+| 16,421 | 2,501 tok/s | 6.74 s |
+| 32,806 | 2,430 tok/s | 13.67 s |
+| 65,573 | 2,331 tok/s | 28.30 s |
+| 131,110 | 2,197 tok/s | 59.86 s |
 
-Single-stream prose varies from run to run, 46 to 55 tok/s with the same settings (46.2, 46.9 and 55.0 tok/s in three runs, about 15%); the
+Prefill is 13 to 15% faster than before patch 0014 (4k: 2,325 to 2,665 tok/s, 16k: 2,191 to 2,501, 128k: 1,947 to 2,197): the routed experts of
+prompt chunks now run through a shared-memory tile kernel (`TF_FLASHNEXT_PROMPT_EXPERT_TILE`, on by default, bit-identical results). Paired,
+alternating runs of the same build with the tile off and on (3 server starts each, median of 3 prompts per start, `tools/bench_streams.py`):
+2,090 to 2,397 tok/s at 4k (+14.7%), 2,174 to 2,474 at 16k (+13.8%), 2,161 to 2,450 at 32k (+13.4%). Decode is unchanged (the tile only runs for
+prompt chunks of 1,024 rows or more).
+
+Single-stream prose varies from run to run, 46 to 55 tok/s with the same settings (46.2, 46.9, 48.5 and 55.0 tok/s in four runs, about 15%); the
 other points agreed within 2 tok/s. Run sparkDash on the Spark itself: from another machine over a slow link it adds the link's round trip to every
 TTFT (about 1.1 s over a 387 ms Tailscale path in our test) and staggers the requests, which lowers the multi-stream numbers.
 
@@ -94,27 +100,27 @@ numbers are our earlier Python build of the same checkpoint (patches 0003-0006),
 
 | Concurrent requests | Zig total | Zig per request | Zig TTFT | Python total | Python per request |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 49.7 tok/s | 49.7 | 70 ms | 49.5 | 49.5 |
-| 2 | 93.7 tok/s | 46.8 | 102 ms | 93.3 | 46.7 |
-| 3 | 132.0 tok/s | 44.0 | 134 ms | 123.5 | 41.2 |
-| 4 | 167.7 tok/s | 41.9 | 167 ms | 155.2 | 38.8 |
-| 5 | 187.2 tok/s | 37.4 | 197 ms | 180.0 | 36.0 |
+| 1 | 49.8 tok/s | 49.8 | 68 ms | 49.5 | 49.5 |
+| 2 | 93.2 tok/s | 46.6 | 101 ms | 93.3 | 46.7 |
+| 3 | 131.7 tok/s | 43.9 | 130 ms | 123.5 | 41.2 |
+| 4 | 166.8 tok/s | 41.7 | 163 ms | 155.2 | 38.8 |
+| 5 | 198.2 tok/s | 39.6 | 210 ms | 180.0 | 36.0 |
 
 **Decode, code**
 
 | Concurrent requests | Zig total | Zig per request | Zig TTFT | Python total | Python per request |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 51.3 tok/s | 51.3 | 69 ms | 57.1 | 57.1 |
-| 2 | 94.3 tok/s | 47.2 | 102 ms | 108.4 | 54.2 |
-| 3 | 136.5 tok/s | 45.5 | 134 ms | 145.0 | 48.3 |
-| 4 | 173.7 tok/s | 43.4 | 168 ms | 184.4 | 46.1 |
-| 5 | 203.1 tok/s | 40.6 | 194 ms | 215.0 | 43.0 |
+| 1 | 50.9 tok/s | 50.9 | 78 ms | 57.1 | 57.1 |
+| 2 | 93.5 tok/s | 46.7 | 100 ms | 108.4 | 54.2 |
+| 3 | 135.5 tok/s | 45.2 | 135 ms | 145.0 | 48.3 |
+| 4 | 173.1 tok/s | 43.3 | 164 ms | 184.4 | 46.1 |
+| 5 | 205.5 tok/s | 41.1 | 196 ms | 215.0 | 43.0 |
 
 Two full runs of the decode tables on a quiet machine agreed to within 1 tok/s except one prose point (5 streams: 186.8 and 187.2).
 (Thinking is on in these runs, so the "code" prompt, "Write a Python quicksort with docstring and tests.", is mostly
 reasoning prose at 256 tokens, which is why the Zig code and prose speeds are close.) The Zig engine matches the Python build
 on prose at one and two streams and is ahead from three streams on (+7% at 3, +4% at 5); on code it is behind at every count
-(51.3 against 57.1 tok/s at one stream, 203.1 against 215.0 at five). The Python build has copy drafting (draft tokens copied
+(50.9 against 57.1 tok/s at one stream, 205.5 against 215.0 at five). The Python build has copy drafting (draft tokens copied
 from earlier text), which helps most on code; the CUDA path of the Zig engine has no such drafter, only the MTP head.
 The Zig TTFT column is a repeat of the same short prompt (the benchmark's own): the server keeps a state one token short of a
 prompt it has served before, so a repeat prefills one row (about 50 ms of GPU time, the cost of any decode round). That repeat-prompt
@@ -125,24 +131,33 @@ prompt pass: with 64 rows nearly every routed expert is read), and a long one co
 
 | Prompt tokens | Zig prefill | Zig TTFT | Python prefill | Python TTFT |
 | ---: | ---: | ---: | ---: | ---: |
-| 4.0k | 2,197 tok/s | 1.84 s | 2,315 (4k) | 1.96 s |
-| 7.9k | 2,195 tok/s | 3.64 s | 2,290 (8k) | 3.77 s |
-| 15.8k | 2,205 tok/s | 7.22 s | 2,273 (16k) | 7.40 s |
-| 31.5k | 2,193 tok/s | 14.41 s | 2,199 (32k) | 15.09 s |
-| 62.8k | 2,141 tok/s | 29.45 s | 2,049 (64k) | 32.18 s |
-| 125.8k | 2,029 tok/s | 62.18 s | 1,889 (128k) | 69.59 s |
+| 4.0k | 2,400 tok/s | 1.67 s | 2,315 (4k) | 1.96 s |
+| 7.9k | 2,428 tok/s | 3.28 s | 2,290 (8k) | 3.77 s |
+| 15.8k | 2,468 tok/s | 6.42 s | 2,273 (16k) | 7.40 s |
+| 31.5k | 2,450 tok/s | 12.91 s | 2,199 (32k) | 15.09 s |
+| 62.9k | 2,400 tok/s | 26.31 s | 2,049 (64k) | 32.18 s |
+| 125.8k | 2,264 tok/s | 55.78 s | 1,889 (128k) | 69.59 s |
 
 (`tools/bench_streams.py` sizes its prompts in generated words, about 0.8 tokens each, so its default `--sizes 5000,...,160000` give these rows.
-Prefill is slightly behind the Python build up to 16k, level at 32k and ahead from 64k.
-Needle in a haystack passes at 32k (prefill 16 s) and at 194,723 tokens (prefill 109.4 s, 1,780 tok/s). A single decode stream varies by
+Prefill is ahead of the Python build at every size (before patch 0014 it was slightly behind up to 16k).
+Needle in a haystack passes at 32k (prefill 16 s) and at 194,723 tokens (prefill 99.4 s, 1,959 tok/s). A single decode stream varies by
 a few tok/s from run to run, and a run taken while another job shared the machine read 34.8 tok/s.
 
 **Memory and mixed load** (default `./start.sh`, no `MEM_CHECK` override, guest Spark with about 116 GiB available before the start). The
 memory check passed (the window needed about 108 GiB at start). The engine loaded in 61 s and reported 24.36 GiB of sequence memory (the
 guest runs other containers, so this is less than the 30 GiB above). System memory in use: 85 GiB idle, 89 GiB after the 195k prompt, and a peak of
 98.6 GiB with five 100k-token prompts and six short ones in flight together. All five long prompts were answered correctly (each finds
-its own passphrase) and all short ones were right, with no crash and no hang. The prefill is serial: five 100k prompts took 265 s in all, and a short
-request sent while they ran waited for the prefills to finish (185 to 260 s) before it was answered.
+its own passphrase) and all short ones were right, with no crash and no hang. By default the prefill is serial: five 100k prompts took about 250 s in all (265 s before patch 0014), and a short
+request sent while they ran waited for the prefills to finish (185 to 260 s) before it was answered. `TF_FLASHNEXT_FILL_FAIR=1` changes that (next paragraph).
+
+**Mixed load: short requests behind long prompts.** Opt in with `TF_FLASHNEXT_FILL_FAIR=1` (patch 0015, one rank). The engine then fills prompts in
+slices of two layers, hands the prompt buffers on at chunk boundaries, shortest prompt first (a long one ages by 1,024 rows per boundary it loses), and
+decoders keep running between slices. Five 100k-token prompts, one running decoder and a short request every 20 s (`--parallel 8`): a short request waited
+1.8 s at the median and 3.9 s at the worst (187 s and 256 s without it), and the running decoder's longest gap between tokens fell from 12 to 15 s per
+long prompt (stalls of up to 218 s in the stress) to 0.27 s. The price: the long prompts finish later, the first at 111 s instead of 53 s, and a mixed load
+takes longer in total (about 22% in our run, 280 s to 342 s, before the tile; the same load measured with the tile took 311 s). With nothing else running,
+prefill speed is unchanged. Replies are bit-identical to the default (7-prompt test, drafted equal to serial). With the default `PARALLEL` of 5, five long
+prompts and a decoder fill all five slots, so a short request still waits for a slot. Off by default; two ranks are not supported by it.
 
 **Quality.** Teacher forcing the Python build's greedy output of seven prompts through the Zig engine, its next token equals
 the Python token at 2,270 of 2,295 positions (98.9%); the disagreements are near-ties between two plausible words
@@ -464,6 +479,8 @@ Every setting lives in [`scripts/config.sh`](scripts/config.sh). Override it fro
 | `TF_FLASHNEXT_REPEAT_CACHE` | `1` | a prompt the server has served before keeps a state one token short of its end, so a repeat prefills one row (63-token prompt: TTFT 170 ms to 70 ms). `0` turns it off |
 | `TF_FLASHNEXT_ADMIT_WAIT_MS` | `3` | an idle server waits this long after a first request for others sent with it, so a burst prefills in one pass and decodes in step |
 | `TF_FLASHNEXT_PREFILL_TAIL` | `512` | a short last prompt chunk joins the previous one |
+| `TF_FLASHNEXT_PROMPT_EXPERT_TILE` | `2` | routed experts of prompt chunks of 1,024 rows or more run through a shared-memory tile kernel (patch 0014): `2` gate/up and down, `1` gate/up only, `0` the older kernels. Same output bits, cold prefill +13 to 15%. One rank only (two ranks keep the older kernels unless it is set) |
+| `TF_FLASHNEXT_FILL_FAIR` | `0` | `1` fills prompts in slices, shortest first, so short requests and running decoders are not stalled behind long prompts (patch 0015): a short request behind five 100k prompts waits about 2 s instead of 3 to 4 minutes; a mixed load takes about 20% longer in total. `TF_FLASHNEXT_FILL_LAYERS` (slice, default 2) and `TF_FLASHNEXT_FILL_AGING` (rows, default 1024) tune it. One rank only |
 | `CHECKPOINT` | `nvfp4` | `nvfp4` serves `nvidia/Qwen3.8-Flash-Next-FP4-Local`; `int4` serves azampatti's INT4-AutoRound (sets its model id and revision). `MODEL_ID` / `MODEL_REVISION` override either |
 | `MODEL_REVISION` | `b9ce18a6…` | the checkpoint commit this recipe serves (`14642741…` with `CHECKPOINT=int4`) |
 
@@ -500,9 +517,9 @@ the model was still thinking.
 
 `patches/*.patch` is the Zig Flash Next CUDA engine against TensorFold `db281878` (the `zig-flashnext` pin), applied
 with `git apply` in the checkout root. They are the engine, not speed patches on a Python package. Drafts are still
-checked: a drafted reply matches `"draft": false`. `0011` to `0013` are this recipe's own: `0011` lets the vision helper load the NVIDIA
+checked: a drafted reply matches `"draft": false`. `0011` to `0015` are this recipe's own: `0011` lets the vision helper load the NVIDIA
 checkpoint's quantized tower, `0012` makes the Zig engine serve the NVIDIA FP4 checkpoint (config, CSF-compressed expert scales, MXFP8 linears, the
-NVFP4 n-gram table with read-ahead) and `0013` tunes decoding (draft depth 6, the repeat-prompt cache, burst admission).
+NVFP4 n-gram table with read-ahead) and `0013` tunes decoding (draft depth 6, the repeat-prompt cache, burst admission). `0014` adds a shared-memory expert tile for prompt chunks (on by default, bit-identical, cold prefill +13 to 15%) and `0015` an opt-in fair prefill for mixed loads (`TF_FLASHNEXT_FILL_FAIR=1`).
 
 ## Checks
 
@@ -555,7 +572,7 @@ covers this repository's scripts only.
 - **Zig CUDA serving path and CUDA family registry:** Jürgen Schmied ([jschmied](https://github.com/jschmied)), in
   [TensorFold PR #443](https://github.com/ashhart/TensorFold/pull/443)
   (commit [`59e77e8`](https://github.com/ashhart/TensorFold/commit/59e77e8f4b875ce0e863a8c896fc8e424bc539ac)).
-- **NVIDIA FP4 support in the Zig engine** (patches 0011 to 0013): MiaAI-Lab, built on TensorFold's Python implementation of the same formats by the
+- **NVIDIA FP4 support in the Zig engine** (patches 0011 to 0015): MiaAI-Lab, built on TensorFold's Python implementation of the same formats by the
   TensorFold Contributors.
 - **Model:** [Qwen3.8 Flash Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by the Qwen team (Alibaba).
 - **Default checkpoint:** NVIDIA's [FP4 QAD export](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local) (Model Optimizer).
