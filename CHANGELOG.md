@@ -5,6 +5,54 @@ Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:
 
 ## Unreleased
 
+**Triage of the open pull requests and issues (2026-10-25): two ports, one new setting and README notes.**
+
+- `patches/0021-flash-next-sliced-fill-one-at-a-time.patch`, from [BadAd84](https://github.com/BadAd84)'s PR #53 and hand-rebased onto the FP4 engine tree: with
+  `TF_FLASHNEXT_FILL=1` (without `FILL_FAIR`), prompts that arrive together are filled one after another; before, a second fill returned
+  `PromptBuffersBusy` and every filling prompt ended with that error, and a resume's MTP absorb could overwrite another prompt's open chunk. The resume's
+  absorb now runs when its own chunk opens. It does not fix #71 (one filling prompt, `CudaFailed`), which has a different trigger.
+- `patches/0031-server-random-seed.patch`, new, for #75 and #68: `TENSORFOLD_RANDOM_SEED=1` makes a sampled request without a `seed` draw a fresh one, as
+  OpenAI's API does. Off by default (the engine keys an omitted seed to the prompt, which keeps the `exact.py` and `"draft": false` comparisons
+  reproducible); an explicit `seed` always wins. Two server tests; they fail without the change.
+- Patch 0030 (below) was merged with review fixes: its image key moved to `server/media_match.zig` with length-prefixed fields, a wider identity
+  (up to 248 bits) and no key for runs under 4 rows, with four tests, and `zig build test` now also runs the core `engine_api` tests (lane host, prompt
+  cache), which were not built before. Both 0029 and 0030 were credited to [tempeste](https://github.com/tempeste).
+- README: the NV_ERR_NO_MEMORY section corrected and extended by [hecisaza](https://github.com/hecisaza) (PR #64); a "Thinking and sampling" list on
+  `thinking_budget`, the prompt-keyed default seed, the ignored penalty fields, control tokens in the reasoning and `tool_choice: "required"` without
+  thinking (#7, #68, #74, #75, #76).
+- Not merged: structured output (#69, #66; a new xgrammar build dependency and compile limits, left for a decision) and the stacked engine patches
+  0010 to 0028 of BadAd84 (#35 to #63, written against the INT4 build: they need a rebase onto patches 0011 to 0015, a new number and a re-measure on the
+  NVIDIA FP4 checkpoint). `zig build test` on the pinned TensorFold with patches 0001 to 0031: see the commit message of this entry.
+
+**Image prompts resume the prompt cache: the next turn after a screenshot prefills only its new rows (#5).**
+
+- `patches/0030-flash-next-image-prompt-reuse.patch`: a prompt with an image was neither kept nor resumed, so every turn of a conversation with an
+  image prefilled from its first token, the long system prompt included. Image placeholder rows were all the same token, so a token match could not
+  tell two images apart. Each image's rows now carry match ids from a SHA-256 over its data URL bytes, its detail and its rotary grid (an https
+  image's hash also takes its feature rows, as the URL's content may change), so the cache resumes up to the first row where two prompts differ, image
+  or text. On resume the rotary table and the features of the kept rows are attached before the prompt continues; each prompt segment gets only the
+  images before its cut. Videos are not kept.
+  - A segment whose images are refused for memory at a kept mark ends that request alone; its fill is freed once.
+  - A deferred fair-fill begin (`TF_FLASHNEXT_FILL_FAIR=1`) resumes only the kept state it saw (its generation); a state evicted meanwhile means a
+    prefill from 0. Works with `TF_FLASHNEXT_FILL_FAIR` off and on.
+  - `TF_FLASHNEXT_MEDIA_REUSE=0` restores the old rule. One rank only.
+- Before and after, same server settings (defaults, NVIDIA FP4 checkpoint, 5 x 262,144 fp8), a 12.2k-token system prompt, temperature 0:
+
+  | request | prompt | 0015: cached, prefill | 0030: cached, prefill |
+  |---|---:|---:|---:|
+  | text only, cold | 12,226 | 0, 6.56 s | 0, 6.58 s |
+  | image A, first turn | 12,528 | 0, 6.24 s | 11,687, 0.93 s |
+  | image A, next turn | 12,614 | 0, 6.29 s | 12,521, 0.35 s |
+  | image B in place of A | 12,614 | 0, 6.28 s | 12,199, 0.72 s |
+  | text only, next turn | 12,260 | 12,219, 0.25 s | 12,219, 0.28 s |
+  | image A turn repeated | 12,614 | 0, 6.30 s | 12,607, 0.19 s |
+
+  Every reply has the same token hash on both builds (image B is read as its own text, not image A's). With `TF_FLASHNEXT_FILL_FAIR=1` the hashes and
+  cached counts are the same; with `TF_FLASHNEXT_MEDIA_REUSE=0` every image request is cached 0, as on 0015.
+- Checks: `tools/exact.py` passes with the same token hashes as 0015, `tools/toolcheck.py` 3/3, `tools/visioncheck.py` (also with fair fill and with
+  reuse off), `tools/prompt_reuse.py 30000` (worst follow-up resumed 99.3%). `zig build test`: 203 of 203 (202 on 0015). Prefill and decode are
+  unchanged: 100k prompt 1,969 tok/s (1,974 on 0015), decode code 49.3 tok/s, chat 42.1 (the same).
+
 **Free after drain and admission reclaim: no more `CUDA_ERROR_ILLEGAL_ADDRESS` after a refused prompt, and kept prompt states give way to new requests.**
 
 - `patches/0029-flash-next-free-after-drain-admission-reclaim.patch`, three parts:
