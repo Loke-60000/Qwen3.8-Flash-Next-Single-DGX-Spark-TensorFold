@@ -109,6 +109,11 @@ export TF_FLASHNEXT_PROMPT_EXPERT_TILE="${TF_FLASHNEXT_PROMPT_EXPERT_TILE:-2}"
 # state it resumed once it keeps a longer one. 0 turns either off. Freeing a sequence always waits for the GPU's queued work.
 export TF_FLASHNEXT_ADMIT_RECLAIM="${TF_FLASHNEXT_ADMIT_RECLAIM:-1}"
 export TF_FLASHNEXT_SUPERSEDE="${TF_FLASHNEXT_SUPERSEDE:-1}"
+# Image prompts in the prompt cache (patch 0030), ON by default, one rank only: a conversation with images keeps and
+# resumes its prompt states like a text one, each image told apart by a hash of its bytes, so a repeated image turn
+# prefills only its new rows. Videos are not kept. TF_FLASHNEXT_MEDIA_REUSE=0 restores the old rule (image prompts
+# prefill from their start every turn).
+export TF_FLASHNEXT_MEDIA_REUSE="${TF_FLASHNEXT_MEDIA_REUSE:-1}"
 # KV cache (--kv-dtype). fp8 is the default: about 1.84x the pool of bf16, and lossy (~98.8% top-1 agreement with a
 # bf16 cache, so a free-running reply can differ). bf16 is exact: KV_DTYPE=bf16. FP8 works together with --vision.
 KV_DTYPE="${KV_DTYPE:-fp8}"
