@@ -22,7 +22,8 @@ Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:
   thinking (#7, #68, #74, #75, #76).
 - Not merged: structured output (#69, #66; a new xgrammar build dependency and compile limits, left for a decision) and the stacked engine patches
   0010 to 0028 of BadAd84 (#35 to #63, written against the INT4 build: they need a rebase onto patches 0011 to 0015, a new number and a re-measure on the
-  NVIDIA FP4 checkpoint). `zig build test` on the pinned TensorFold with patches 0001 to 0031: see the commit message of this entry.
+  NVIDIA FP4 checkpoint). `zig build test` on the pinned TensorFold `db281878` with patches 0001 to 0031 applied in order: 235 of 235 tests (clean cache; no GPU, so the kernels and
+  the byte-identical claims of 0021, 0029 and 0030 rest on their authors' and reviewers' runs).
 
 **Image prompts resume the prompt cache: the next turn after a screenshot prefills only its new rows (#5).**
 

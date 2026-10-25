@@ -342,8 +342,9 @@ A video is a `video_url` part (`{"type": "video_url", "video_url": {"url": "data
 | Per request | up to 50 (all of a chat's turns count), 10 MB each, 64 MB in all | up to 4 (`MAX_VIDEOS`), 64 MB each, 96 MB in all, up to an hour of footage |
 | Tokens | up to 16,384 for all images, at most 4,096 an image (`"detail": "low"`: 256 an image) | 2 frames a second (at most 256 frames), up to 16,384 tokens a request (`TENSORFOLD_VIDEO_TOKENS`) |
 
-By default only data URLs are accepted. `VISION_URLS=1` also lets the server fetch public `https://` URLs. Image and
-video prompts are not kept for prefix reuse, so each turn of a chat with images processes them again. A request body
+By default only data URLs are accepted. `VISION_URLS=1` also lets the server fetch public `https://` URLs. Image prompts are kept for prefix reuse
+(each image matched by a hash of its bytes; `TF_FLASHNEXT_MEDIA_REUSE=0` turns that off), so a chat's next turn after an image
+prefills only its new rows, but the vision tower still runs for every image each turn. Video prompts are not kept. A request body
 can be up to 96 MiB. `VISION=0 ./start.sh restart` serves text only and gives the 2 GiB helper workspace back to the
 KV pool.
 

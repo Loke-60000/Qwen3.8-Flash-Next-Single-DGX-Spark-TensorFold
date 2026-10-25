@@ -49,6 +49,7 @@ license files from the pinned checkout.
   `zig/tests/cuda/copies.py`; the engine's own new files say "Written for TensorFold by TensorFold Contributors". The prompt expert tile kernel (`patches/0014`) follows the staging idea of the earlier Python engine's expert kernel; its header credits the TensorFold Contributors.
 - **Free after drain and admission reclaim** (`patches/0029`): by [tempeste](https://github.com/tempeste), on TensorFold's prompt cache
   (`core/prompt_cache.zig`), lane host and Flash Next lanes engine by Ash Hart and the TensorFold contributors.
+- **Sliced fills one at a time** (`patches/0021`): by [BadAd84](https://github.com/BadAd84) (PR #53), rebased onto the FP4 engine by MiaAI-Lab.
 - **Image prompts in the prompt cache** (`patches/0030`): by [tempeste](https://github.com/tempeste), on TensorFold's prompt cache
   (`core/prompt_cache.zig`), lane host, vision input and Flash Next lanes engine by Ash Hart and the TensorFold contributors.
 - **The Zig CUDA serving path and the CUDA family registry** were authored by Jürgen Schmied
