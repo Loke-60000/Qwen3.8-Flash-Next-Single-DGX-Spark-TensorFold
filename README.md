@@ -536,7 +536,9 @@ the model was still thinking.
   `reasoning_effort: low` and `enable_thinking: false` are the other levers.
 - **Without a `seed`, the same prompt gives the same sampled reply.** The engine derives the seed from the prompt's token ids (`sampling.seedFor`), so a
   repeated request at temperature 1.0 is repeated, which also makes `"draft": false` comparisons reproducible. Clients that want a different reply per call
-  (best-of-n, "regenerate", retries) send their own random `seed`; `TENSORFOLD_SEED_SALT=<integer>` changes every derived seed at once.
+  (best-of-n, "regenerate", retries) send their own random `seed`, or start the server with `TENSORFOLD_RANDOM_SEED=1 ./start.sh restart` (`patches/0031-server-random-seed.patch`): a sampled
+  request without a `seed` then draws a fresh one, as OpenAI's API does (an explicit `seed` still wins; off by default so the `exact.py` and `"draft": false`
+  comparisons stay reproducible). `TENSORFOLD_SEED_SALT=<integer>` changes every derived seed at once.
 - **`presence_penalty`, `frequency_penalty` and `repetition_penalty` are accepted and have no effect** (the engine does not implement them), and out-of-range
   sampling values such as `temperature: -1` are not rejected. Use `top_p`, `top_k`, `min_p` and `temperature` to steer repetition.
 - **A control token in the reasoning ends the turn.** The engine stops on the checkpoint's end tokens (`<|endoftext|>` 248044 and `<|im_end|>` 248046 in its
