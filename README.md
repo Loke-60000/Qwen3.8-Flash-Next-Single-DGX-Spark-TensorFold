@@ -530,6 +530,24 @@ By default the model thinks first. Per request, `temperature`, `top_p`, `top_k` 
 comes back in `reasoning_content`, the answer in `content`. A small `max_tokens` can return empty `content` because
 the model was still thinking.
 
+- **A reply that spends its whole `max_tokens` thinking:** `thinking_budget` (a request field; `--thinking-budget N` as a server default, for example
+  `./start.sh restart --thinking-budget 4096`) closes the think block after that many reply tokens and lets the answer start
+  (`zig/src/core/lanes/stream.zig`, `think_budget`; the closing is done in the engine's lanes, so drafted and serial replies cut at the same token).
+  `reasoning_effort: low` and `enable_thinking: false` are the other levers.
+- **Without a `seed`, the same prompt gives the same sampled reply.** The engine derives the seed from the prompt's token ids (`sampling.seedFor`), so a
+  repeated request at temperature 1.0 is repeated, which also makes `"draft": false` comparisons reproducible. Clients that want a different reply per call
+  (best-of-n, "regenerate", retries) send their own random `seed`; `TENSORFOLD_SEED_SALT=<integer>` changes every derived seed at once.
+- **`presence_penalty`, `frequency_penalty` and `repetition_penalty` are accepted and have no effect** (the engine does not implement them), and out-of-range
+  sampling values such as `temperature: -1` are not rejected. Use `top_p`, `top_k`, `min_p` and `temperature` to steer repetition.
+- **A control token in the reasoning ends the turn.** The engine stops on the checkpoint's end tokens (`<|endoftext|>` 248044 and `<|im_end|>` 248046 in its
+  `eos_token_id`; the report saw `<|im_start|>` 248045 stop a reply too). If the model writes one while it is still thinking, for example when it quotes it in its analysis, the reply stops right there
+  with `finish_reason: "stop"`, empty `content` and a cut `reasoning_content` ([#76](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/76)).
+  A client can treat a `stop` with empty `content` as a failed turn and retry with `enable_thinking: false`.
+- **`tool_choice: "required"` with thinking off** gives the model no room to reason before the call: the engine replaces the first answer token that
+  does not open a call with the call opener (`zig/src/core/lanes/call_gate.zig`), and the function is then picked from that forced start. With many
+  tools, the pick can be less relevant than under `auto`. Keep thinking on (the gate waits until the think block has closed), use `auto` with an
+  instruction to call a tool, or name the function in `tool_choice`.
+
 ### API notes
 
 - Endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages` (Anthropic) and
