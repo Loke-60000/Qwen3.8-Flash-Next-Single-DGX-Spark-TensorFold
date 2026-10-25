@@ -39,23 +39,25 @@ esac
 MODEL_REVISION="${MODEL_REVISION:-}"
 unset _pin
 
-# The engine: TensorFold's Zig engine, built from TF_REPO at TF_REF (branch zig-flashnext) with patches/*.patch
-# applied (git apply in the checkout's root), with Zig ZIG_VERSION. Only the Zig build goes into the image.
+# The engine: TensorFold's Zig engine (tensorfold-native), built from TF_REPO at TF_REF (the v1.1.4 release) with patches/*.patch
+# applied (git apply in the checkout's root), with Zig ZIG_VERSION. Only the Zig build goes into the image, plus the two
+# image decoders the engine wants (libjpeg-turbo for JPEG, libwebp's decoder for WebP), built from pinned sources.
 TF_REPO="${TF_REPO:-https://github.com/ashhart/TensorFold.git}"
-TF_REF="${TF_REF:-db281878ddb836fd0df510d8771ecb7e0fe47d26}"   # zig-flashnext; patches bring the gated Flash Next CUDA engine
+TF_REF="${TF_REF:-eab8582819688325e371907e4706e1c602b8a273}"   # v1.1.4
 ZIG_VERSION="${ZIG_VERSION:-0.17.0}"
 ZIG_SHA256="${ZIG_SHA256:-9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8}"
 BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/pytorch:26.07-py3}"
-TF_TAG="zig-${TF_REF:0:7}"
+LIBJPEG_TURBO_VERSION=3.1.4.1
+LIBJPEG_TURBO_SHA256=ecae8008e2cc9ade2f2c1bb9d5e6d4fb73e7c433866a056bd82980741571a022
+LIBWEBP_VERSION=1.6.0
+LIBWEBP_SHA256=e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564
+TF_TAG="v1.1.4-${TF_REF:0:7}"
 IMAGE="${IMAGE:-tensorfold-qwen38:${TF_TAG}}"
-KERNELS_PATH=/opt/tensorfold/share/tensorfold/cuda/sm121
-# Triton's line info records each kernel source's mtime. Pin it so cubins match the reference kernel set.
-KERNEL_SOURCE_MTIME="${KERNEL_SOURCE_MTIME:-1791318675}"
 image_hash() {
   ( cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
     cat patches/*.patch 2>/dev/null
     sed -n "/<<'DOCKERFILE'/,/^DOCKERFILE\$/p" scripts/prepare.sh
-    echo "$TF_REPO $TF_REF zig-$ZIG_VERSION $ZIG_SHA256 $BASE_IMAGE kernel-mtime-$KERNEL_SOURCE_MTIME tp-1"
+    echo "$TF_REPO $TF_REF zig-$ZIG_VERSION $ZIG_SHA256 $BASE_IMAGE jpeg-$LIBJPEG_TURBO_VERSION-$LIBJPEG_TURBO_SHA256 webp-$LIBWEBP_VERSION-$LIBWEBP_SHA256"
   ) | sha256sum | cut -c1-12
 }
 GHCR_IMAGE="${GHCR_IMAGE:-ghcr.io/miaai-lab/qwen3.8-flash-next-single-dgx-spark-tensorfold}"
@@ -70,13 +72,8 @@ CONTAINER_NAME="${CONTAINER_NAME:-qwen38-flash-next-tf}"
 SERVED_NAME="${SERVED_NAME:-Qwen3.8-Flash-Next}"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8888}"
-# Native window 262,144. Past it the engine applies Qwen's YaRN (factor 4) when TF_FLASHNEXT_YARN=4, up to 1,048,576.
-# On one Spark a full 1M-token fp8 cache is 17.46 GiB (bf16 is 30.06 GiB) on top of the weights (~66 GiB INT4, ~81 NVIDIA FP4); a full 1M
-# prompt's scratch on top of that is not the default. The default stays the native window.
+# Native window 262,144; the Flash Next CUDA engine of TensorFold 1.1.4 has no YaRN extension, so this is also the maximum.
 CONTEXT="${CONTEXT:-262144}"
-if [[ "$CONTEXT" =~ ^[0-9]+$ ]] && (( CONTEXT > 262144 )); then _yarn=4; else _yarn=0; fi
-export TF_FLASHNEXT_YARN="${TF_FLASHNEXT_YARN:-$_yarn}"
-unset _yarn
 # Requests decoded together. The engine admits each one inside its own budget (MemAvailable after load, less
 # TENSORFOLD_MEMORY_RESERVE_GIB, and with VISION=1 less another 2 GiB kept for the vision helper) and refuses one
 # that would not fit. The pool is shared: streams grow on demand, so PARALLEL is a cap, not a promise that every
@@ -84,37 +81,9 @@ unset _yarn
 # engine reports a 24.3 GiB sequence pool after load, one full 262,144 window is 4.4 GiB, so 5 streams x 262,144 fit
 # (21.9 GiB); 8 streams at full windows do not (35 GiB), they share the pool. 5 is the default for that reason.
 PARALLEL="${PARALLEL:-5}"
-# MTP: up to this many drafts a round, kept while confidence stays at least this. Drafts are checked, so replies match
-# serial decoding. 6 drafts: on the NVIDIA FP4 checkpoint deeper chains (the engine's 15) cost verify rows and lose 5 to 20%
-# at 3 to 5 streams (measured, 1 to 5 streams, depths 4 to 15); 4 to 8 are within noise of each other.
-export TF_FLASHNEXT_DEPTH="${TF_FLASHNEXT_DEPTH:-6}"
-# Unset TF_FLASHNEXT_CONFIDENCE: the engine uses the running product (-0.4) while at most
-# TF_FLASHNEXT_PRODUCT_STREAMS streams are live, and confidence 0.5 above that. Setting
-# TF_FLASHNEXT_CONFIDENCE=0.5 forces the per-draft rule at every width. 5 (= PARALLEL's default): the product at every
-# width the default serves.
-export TF_FLASHNEXT_PRODUCT_STREAMS="${TF_FLASHNEXT_PRODUCT_STREAMS:-5}"
-export TF_FLASHNEXT_PREFILL_TAIL="${TF_FLASHNEXT_PREFILL_TAIL:-512}"
-# Prompt experts as a shared-memory tile (patch 0014): the routed experts of prompt chunks of 1024 rows or more run
-# through a 64-pair tile kernel that gives bit-identical results to the older kernels and cold prefill +14% (16k prompt).
-# 2 = gate/up and down, 1 = gate/up only, 0 = the older kernels. (Decode and chunks under 1024 rows are not affected.)
-export TF_FLASHNEXT_PROMPT_EXPERT_TILE="${TF_FLASHNEXT_PROMPT_EXPERT_TILE:-2}"
-# Fair prefill (patch 0015), OFF by default: with several long prompts queued, prompts are filled in slices, shortest first,
-# so a short request waits ~2 s (not minutes) behind five 100k prompts and running decoders keep a ~0.15 s gap. Costs ~20% on
-# the total time of a mixed load (five 100k prompts + shorts: 280 s -> 342 s); idle prefill is unchanged. One rank only.
-# Opt in: TF_FLASHNEXT_FILL_FAIR=1 (TF_FLASHNEXT_FILL_LAYERS slice size, default 2; TF_FLASHNEXT_FILL_AGING rows, default 1024).
-# Prompt cache room (patch 0029), ON by default, one rank only. Kept prompt states share the sequence pool with live requests;
-# without this a prompt that does not fit is refused (NoRoom) even when idle kept states hold the room it needs.
-# TF_FLASHNEXT_ADMIT_RECLAIM: admission frees kept states (superseded first, else least recently used, never the prompt's
-# own resume) when, and only when, that makes the prompt fit. TF_FLASHNEXT_SUPERSEDE: a conversation's next turn frees the
-# state it resumed once it keeps a longer one. 0 turns either off. Freeing a sequence always waits for the GPU's queued work.
-export TF_FLASHNEXT_ADMIT_RECLAIM="${TF_FLASHNEXT_ADMIT_RECLAIM:-1}"
-export TF_FLASHNEXT_SUPERSEDE="${TF_FLASHNEXT_SUPERSEDE:-1}"
-# Image prompts in the prompt cache (patch 0030), ON by default, one rank only: a conversation with images keeps and
-# resumes its prompt states like a text one, each image told apart by a hash of its bytes, so a repeated image turn
-# prefills only its new rows. Videos are not kept. TF_FLASHNEXT_MEDIA_REUSE=0 restores the old rule (image prompts
-# prefill from their start every turn).
-export TF_FLASHNEXT_MEDIA_REUSE="${TF_FLASHNEXT_MEDIA_REUSE:-1}"
-# KV cache (--kv-dtype). fp8 is the default: about 1.84x the pool of bf16, and lossy (~98.8% top-1 agreement with a
+# MTP: up to this many drafts a round (the engine's default is 6; drafts are checked, so replies match serial decoding).
+export TF_FLASHNEXT_DRAFTS="${TF_FLASHNEXT_DRAFTS:-6}"
+# KV cache (--kv-cache). fp8 is the default (patch 0003): about 1.84x the pool of bf16, and lossy (~98.8% top-1 agreement with a
 # bf16 cache, so a free-running reply can differ). bf16 is exact: KV_DTYPE=bf16. FP8 works together with --vision.
 KV_DTYPE="${KV_DTYPE:-fp8}"
 MAX_TOKENS="${MAX_TOKENS:-32768}"
