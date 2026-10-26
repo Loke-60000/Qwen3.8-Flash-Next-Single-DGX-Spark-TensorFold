@@ -98,6 +98,13 @@ export TF_FLASHNEXT_GATHER_READ="${TF_FLASHNEXT_GATHER_READ:-pread}"
 export TF_FLASHNEXT_DRAFT_AHEAD="${TF_FLASHNEXT_DRAFT_AHEAD:-1}"
 export TF_FLASHNEXT_WARM_AHEAD="${TF_FLASHNEXT_WARM_AHEAD:-1}"
 export TF_FLASHNEXT_PREFILL_TAIL="${TF_FLASHNEXT_PREFILL_TAIL:-512}"
+# Prompt passes: the hyper-connection normalize, down GEMM, up GEMM and mix run as fused kernels, the shared expert's rows go straight into the y slot,
+# the routed experts use the shared-memory row tiles from 256 rows, and the MTP head takes prompt pieces of 1536 rows (patch 0014; bit-identical to the
+# unfused path: tf-cuda-test hc-fuse, exact.py, pDS-sampled-exact).
+export TF_FLASHNEXT_PROMPT_HC2="${TF_FLASHNEXT_PROMPT_HC2:-1}"
+export TF_FLASHNEXT_PROMPT_SHARED_DIRECT="${TF_FLASHNEXT_PROMPT_SHARED_DIRECT:-1}"
+export TF_FLASHNEXT_PROMPT_EXPERT_TILE_ROWS="${TF_FLASHNEXT_PROMPT_EXPERT_TILE_ROWS:-256}"
+export TF_FLASHNEXT_HEAD_PIECE="${TF_FLASHNEXT_HEAD_PIECE:-1536}"
 # KV cache (--kv-cache). fp8 is the default (patch 0003): about 1.84x the pool of bf16, and lossy (~98.8% top-1 agreement with a
 # bf16 cache, so a free-running reply can differ). bf16 is exact: KV_DTYPE=bf16. FP8 works together with --vision.
 KV_DTYPE="${KV_DTYPE:-fp8}"
