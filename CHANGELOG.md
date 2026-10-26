@@ -5,6 +5,18 @@ Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:
 
 ## Unreleased
 
+**TensorFold v1.1.4 (the latest release) with our changes re-implemented on its own Flash Next CUDA engine.**
+
+v1.1.4 replaces the engine the earlier patches were written against, so patches 0001 to 0031 of the db281878 series are retired and the
+recipe now carries eleven patches on v1.1.4 (`patches/0001` to `0011`):
+- `0001`, `0002`: v1.1.4 loads NVIDIA's quantized vision tower (MXFP8 attention, NVFP4 MLP and merger decoded to bf16 at load); the image-token budget goes to 16384.
+- `0003`: `--kv-cache fp8` for Flash Next (5 full 262,144-token windows fit; stock v1.1.4 fits 3). `0005`: the fp8 attention reader keeps the next tile in registers, the MTP head's cache stays bf16 and its rows are 4-bit.
+- `0004`, `0006`: the prompt expert tile and prefill work (no drain between prompt chunks, no zero fill of the fp32 `y` buffer, vectorised hyper-connection kernels, a 128x128 MXFP8 prompt tile for prompt passes only, 3072-row chunks).
+- `0007` to `0011`: sampled requests (temperature above 0) join the batched draft pass, GPU top-k candidates with a 3x faster kernel, a round-cost model (off), the n-gram rows of all lanes gathered in one pass, and host draws on worker threads. Settings in `scripts/config.sh`, all bit-identical in output: `TF_FLASHNEXT_SAMPLED_HEADS`, `SAMPLE_CAND`, `GATHER_EARLY`, `HOST_DRAW_THREADS`.
+- Image: libjpeg-turbo 3.1.4.1 and libwebp 1.6.0's decoder are built from checksummed sources (JPEG and WebP input); `fatbins native` only, since v1.1.4's `install` step does not compile (`contract_controls.cu`, `w4a8_tests.zig`; fixed inside patch 0004).
+- Already in v1.1.4 and dropped from our series: image-prompt reuse (#5), random seeds without a `seed` (`--prompt-seed` restores prompt-keyed seeds), supersede-style cache eviction, the free-after-drain fix for #67. Checkpoint `CHECKPOINT=int4` is not supported by this engine.
+- Measured on one Spark against the previous build (db281878 + the old patches), 5 streams, 300 tokens, same prompts: greedy prose 100.6 vs 110.7 tok/s (distinct prompts), sampled prose 91.7 vs 100.8, 1 stream sampled 38.6 vs 37.3 (faster); prefill 1,713 / 1,964 tok/s at 3k / 13k tokens vs 2,223 / 2,312. v1.1.4 is 10 to 15% behind the previous build at 5 streams and 10 to 15% behind on prefill, and ahead at 1 stream. `tools/exact.py`, `toolcheck.py`, `visioncheck.py`, `prompt_reuse.py` and a 200k needle all pass. The earlier "193 tok/s at 5 streams" came from 5 identical prompts.
+
 **Triage of the open pull requests and issues (2026-10-25): two ports, one new setting and README notes.**
 
 - `patches/0021-flash-next-sliced-fill-one-at-a-time.patch`, from [BadAd84](https://github.com/BadAd84)'s PR #53 and hand-rebased onto the FP4 engine tree: with
