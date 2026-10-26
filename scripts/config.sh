@@ -90,6 +90,14 @@ export TF_FLASHNEXT_SAMPLED_HEADS="${TF_FLASHNEXT_SAMPLED_HEADS:-1}"
 export TF_FLASHNEXT_SAMPLE_CAND="${TF_FLASHNEXT_SAMPLE_CAND:-1}"
 export TF_FLASHNEXT_GATHER_EARLY="${TF_FLASHNEXT_GATHER_EARLY:-1}"
 export TF_FLASHNEXT_HOST_DRAW_THREADS="${TF_FLASHNEXT_HOST_DRAW_THREADS:-7}"
+# A partly rejected draft window no longer replays the DeltaNet state: the kept rows wait in a log and the next verify pass applies them (patch 0012).
+export TF_FLASHNEXT_KEEP_LATE="${TF_FLASHNEXT_KEEP_LATE:-1}"
+# The n-gram table is read with pread by a thread pool and read ahead (draft tokens' rows during the head step, the next prompt chunk's rows during
+# the current one) instead of through an mmap that page-faults (patch 0013). The last two prompt chunks are evened out when the last would be under 512 rows.
+export TF_FLASHNEXT_GATHER_READ="${TF_FLASHNEXT_GATHER_READ:-pread}"
+export TF_FLASHNEXT_DRAFT_AHEAD="${TF_FLASHNEXT_DRAFT_AHEAD:-1}"
+export TF_FLASHNEXT_WARM_AHEAD="${TF_FLASHNEXT_WARM_AHEAD:-1}"
+export TF_FLASHNEXT_PREFILL_TAIL="${TF_FLASHNEXT_PREFILL_TAIL:-512}"
 # KV cache (--kv-cache). fp8 is the default (patch 0003): about 1.84x the pool of bf16, and lossy (~98.8% top-1 agreement with a
 # bf16 cache, so a free-running reply can differ). bf16 is exact: KV_DTYPE=bf16. FP8 works together with --vision.
 KV_DTYPE="${KV_DTYPE:-fp8}"
