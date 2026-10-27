@@ -5,6 +5,47 @@ Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:
 
 ## Unreleased
 
+**Measured gains of the v1.1.4 build (patches 0001 to 0017) over the db281878 build (patches 0001 to 0015), sparkDash on the same Spark, 2026-10-27.**
+The "before" numbers are the sparkDash tables the README carried (db281878 + patches, patch 0014 era); the "after" numbers are a new sparkDash run on the
+v1.1.4 build. Prose was run at temperature 0.7 with thinking on, code at temperature 0 with thinking off; the README did not record the earlier run's
+sampling settings, so the prose and code comparisons are indicative rather than a controlled A/B. Three concurrent requests were not run, so that row has no
+comparison. Gain is (after / before - 1); for TTFT a negative number is better. One run each: single readings vary by about 3%, and single-stream prose by up to 15%.
+
+Decode, prose (aggregate tok/s / per request tok/s / TTFT ms):
+
+| Concurrent requests | Before | After | Aggregate | Per request | TTFT |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 46-55 (50.5 midpoint) / 195 ms | 55.6 / 136 ms | **+10.1%** (+1.1% to +20.9% over the 46-55 spread) | +10.1% | -30.3% |
+| 2 | 73.5 / 38.1 / 204 | 95.4 / 49.4 / 234 | **+29.8%** | +29.7% | +14.7% |
+| 4 | 106.4 / 27.9 / 243 | 145.1 / 38.1 / 300 | **+36.4%** | +36.6% | +23.5% |
+| 5 | 132.7 / 27.7 / 266 | 156.1 / 35.0 / 370 | **+17.6%** | +26.4% | +39.1% |
+
+Decode, code:
+
+| Concurrent requests | Before | After | Aggregate | Per request | TTFT |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 67.9 / 67.9 / 181 | 110.5 / 110.5 / 164 | **+62.7%** | +62.7% | -9.4% |
+| 2 | 100.1 / 51.3 / 330 | 147.2 / 78.7 / 212 | **+47.1%** | +53.4% | -35.8% |
+| 4 | 131.2 / 34.8 / 323 | 192.9 / 52.7 / 374 | **+47.0%** | +51.4% | +15.8% |
+| 5 | 149.7 / 31.9 / 324 | 217.6 / 48.0 / 403 | **+45.4%** | +50.5% | +24.4% |
+
+Prefill, cold prompts (tok/s / TTFT s; the prompt lengths differ by a few tokens between the runs):
+
+| Prompt | Before | After | Prefill | TTFT |
+| ---: | ---: | ---: | ---: | ---: |
+| 4k | 2,665 / 1.73 | 3,050 / 1.52 | **+14.5%** | -12.1% |
+| 8k | 2,583 / 3.36 | 2,956 / 2.95 | **+14.4%** | -12.2% |
+| 16k | 2,501 / 6.74 | 2,839 / 5.95 | **+13.5%** | -11.7% |
+| 32k | 2,430 / 13.67 | 2,735 / 12.16 | **+12.6%** | -11.0% |
+| 64k | 2,331 / 28.30 | 2,230 / 29.57 | **-4.3%** | +4.5% |
+| 128k | 2,197 / 59.86 | 2,269 / 57.94 | **+3.3%** | -3.2% |
+
+Mean of the rows: prose aggregate +23.5% (1, 2, 4, 5 requests), code aggregate +50.5%, prefill +9.0% (+13.8% from 4k to 32k).
+Not a gain: time to first token under load. At four and five concurrent requests it is 16% to 39% higher than before (prose and code), and the 64k prefill point is
+4.3% lower than the earlier run. The 64k reading is also below this run's own 32k and 128k points, so it looks like noise, but it has not been repeated.
+Against the earlier Python-engine build (prose 54.4, 81.3, 101.6, 123.1 tok/s at 1, 2, 4, 5 requests; code 84.9, 128.3, 159.5, 181.9; prefill 2,315 tok/s at 4k, 1,889 at 128k) the new
+numbers are prose +2%, +17%, +43%, +27%; code +30%, +15%, +21%, +20%; prefill +32% at 4k and +20% at 128k.
+
 **TensorFold v1.1.4 (the latest release) with our changes re-implemented on its own Flash Next CUDA engine.**
 
 v1.1.4 replaces the engine the earlier patches were written against, so patches 0001 to 0031 of the db281878 series are retired and the
