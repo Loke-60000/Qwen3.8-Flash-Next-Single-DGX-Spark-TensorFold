@@ -431,7 +431,7 @@ covers this repository's scripts only.
 - **Zig CUDA serving path and CUDA family registry:** Jürgen Schmied ([jschmied](https://github.com/jschmied)), in
   [TensorFold PR #443](https://github.com/ashhart/TensorFold/pull/443)
   (commit [`59e77e8`](https://github.com/ashhart/TensorFold/commit/59e77e8f4b875ce0e863a8c896fc8e424bc539ac)).
-- **The 17 patches in `patches/` (0001 to 0017):** written by MiaAI-Lab (Mia's AI Lab), developed with [Claude Code](https://claude.com/claude-code), MIT License. They modify
+- **The 17 patches in `patches/` (0001 to 0017):** written by MiaAI-Lab (Mia's AI Lab), MIT License. They modify
   TensorFold's own Flash Next CUDA engine (code by Ash Hart and the TensorFold contributors, under TensorFold's licenses). The list, patch by patch, with where each
   idea comes from, is in [`CREDITS.md`](CREDITS.md): the vision tower (0001, 0002), fp8 KV (0003, 0005; the format adapted from MiaAI-Lab's GLM recipe patch 0038), prompt
   expert tile and prefill (0004, 0006, 0014, 0015), sampled streams (0007 to 0011; the GPU top-k idea from MiaAI-Lab's DeepSeek recipe), rollback, `pread` n-gram reader and

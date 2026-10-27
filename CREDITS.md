@@ -44,7 +44,7 @@ license files from the pinned checkout.
   Ash Hart and the TensorFold contributors ([contributors](https://github.com/ashhart/TensorFold/graphs/contributors));
   their authorship is recorded in TensorFold's history.
 - **The 17 patches in `patches/` (0001 to 0017) on TensorFold v1.1.4 are written by MiaAI-Lab** (Mia's AI Lab,
-  [MiaAI-Lab](https://github.com/MiaAI-Lab)), developed with [Claude Code](https://claude.com/claude-code), under this
+  [MiaAI-Lab](https://github.com/MiaAI-Lab)), under this
   repository's MIT License. They modify TensorFold's own Flash Next CUDA engine, which is by Ash Hart and the TensorFold
   contributors; that code keeps TensorFold's licenses (see `NOTICE`). Patch by patch:
   - `0001-vision-nvidia-fp4-tower`: the CUDA vision tower loads NVIDIA's MXFP8 and NVFP4 vision linears, decoded to bf16 at load. MiaAI-Lab.
@@ -114,7 +114,7 @@ This recipe no longer applies those patches (the serving path is the Zig engine)
   **Javier ([jvr0x](https://github.com/jvr0x))**'s language draft vocabularies for this model's vLLM recipe
   ([MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark#84](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark/pull/84)),
   built from each language's Wikipedia by token frequency.
-- `0002`-`0005`, `0007`-`0009`: by MiaAI-Lab, developed with [Claude Code](https://claude.com/claude-code).
+- `0002`-`0005`, `0007`-`0009`: by MiaAI-Lab.
 - FP8 KV (`KV_DTYPE=fp8`) is adapted from MiaAI-Lab's GLM recipe patch `0038-glm-kv-fp8` in
   [GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold).
 
@@ -131,8 +131,7 @@ This recipe no longer applies those patches (the serving path is the Zig engine)
 - The scripts (`start.sh`, `stop.sh`, `scripts/`) and the checks in `tools/` are MiaAI-Lab's. `client.py`,
   `needle.py`, `toolcheck.py` and `prompt_reuse.py` are adapted from MiaAI-Lab's two-Spark recipe
   [GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold);
-  `exact.py` is from MiaAI-Lab's Flash Next two-Spark TensorFold recipe. Developed with
-  [Claude Code](https://claude.com/claude-code).
+  `exact.py` is from MiaAI-Lab's Flash Next two-Spark TensorFold recipe.
 
 ## Runtime stack
 
