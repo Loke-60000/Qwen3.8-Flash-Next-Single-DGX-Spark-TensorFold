@@ -501,7 +501,6 @@ Every setting lives in [`scripts/config.sh`](scripts/config.sh). Override it fro
 | `PARALLEL` | `5` | requests decoded together. One that would not fit (prompt plus `max_tokens`) is refused |
 | `CONTEXT` | `262144` | prompt + reply window. `1048576` turns on YaRN factor 4 |
 | `DRAFTS` | `1` | MTP drafts; `0` passes `--no-drafts` |
-| `TF_FLASHNEXT_DEPTH` | `6` | drafts a round. The stop rule is the engine's hybrid (see `TF_FLASHNEXT_PRODUCT_STREAMS`) |
 | `TEMPERATURE` / `TOP_P` / `TOP_K` | `1.0` / `0.95` / `20` | default sampling; a request's own values win |
 | `THINKING` | `1` | think before answering; `0` passes `--no-thinking` |
 | `MAX_TOKENS` | `32768` | the reply budget when a request sets none |
@@ -513,20 +512,24 @@ Every setting lives in [`scripts/config.sh`](scripts/config.sh). Override it fro
 | `SERVED_NAME` | `Qwen3.8-Flash-Next` | the model id in `/v1/models` |
 | `PORT` / `HOST` | `8888` / `0.0.0.0` | where the API listens |
 | `KV_DTYPE` | `fp8` | lossy (~98.8% top-1 agreement with bf16, about 1.8x the pool). `bf16` is exact. Works with `VISION=1`. Adapted from MiaAI-Lab's GLM recipe patch `0038-glm-kv-fp8` |
-| `TENSORFOLD_MEMORY_RESERVE_GIB` | `10` | kept free when the engine sizes the pool. `prepare.sh` and `start.sh` refuse a Spark below this |
-| `TF_FLASHNEXT_PRODUCT_STREAMS` | `5` | running-product draft stop at this many streams or fewer; confidence 0.5 above it |
-| `TF_FLASHNEXT_REPEAT_CACHE` | `1` | a prompt the server has served before keeps a state one token short of its end, so a repeat prefills one row (63-token prompt: TTFT 170 ms to 70 ms). `0` turns it off |
-| `TF_FLASHNEXT_ADMIT_WAIT_MS` | `3` | an idle server waits this long after a first request for others sent with it, so a burst prefills in one pass and decodes in step |
-| `TF_FLASHNEXT_PREFILL_TAIL` | `512` | a short last prompt chunk joins the previous one |
-| `TF_FLASHNEXT_PROMPT_EXPERT_TILE` | `2` | routed experts of prompt chunks of 1,024 rows or more run through a shared-memory tile kernel (patch 0014): `2` gate/up and down, `1` gate/up only, `0` the older kernels. Same output bits, cold prefill +13 to 15%. One rank only (two ranks keep the older kernels unless it is set) |
-| `TF_FLASHNEXT_FILL_FAIR` | `0` | `1` fills prompts in slices, shortest first, so short requests and running decoders are not stalled behind long prompts (patch 0015): a short request behind five 100k prompts waits about 2 s instead of 3 to 4 minutes; a mixed load takes about 20% longer in total. `TF_FLASHNEXT_FILL_LAYERS` (slice, default 2) and `TF_FLASHNEXT_FILL_AGING` (rows, default 1024) tune it. One rank only |
-| `TF_FLASHNEXT_ADMIT_RECLAIM` | `1` | a prompt that does not fit frees kept prompt states first (a superseded one, else the least recently used; never the state the prompt resumes), and only when that makes it fit; `0` refuses it with `NoRoom` as before (patch 0029). One rank only |
-| `TF_FLASHNEXT_SUPERSEDE` | `1` | a conversation's next turn frees the kept state it resumed once it keeps a longer one, so the cache holds about one state a conversation instead of one a turn (patch 0029). `0` turns it off. One rank only |
+| `TENSORFOLD_MEMORY_RESERVE_GIB` | `9` | kept free when the engine sizes the pool (9 since patch 0014: the fused prompt path needs about 0.55 GiB more scratch, and five full windows need 23.9 GiB). `prepare.sh` and `start.sh` refuse a Spark below this |
+| `TF_FLASHNEXT_DRAFTS` | `6` | drafts a round at most |
+| `TF_FLASHNEXT_CONFIDENCE` / `TF_FLASHNEXT_PRODUCT_STREAMS` | `-0.4` / `5` | the draft chain keeps draft j while the running product of the draft probabilities is at least 0.4, for up to 5 streams drafting together (0.5 per draft above that) (patch 0017). Only the number of drafts changes, never a reply. `TF_FLASHNEXT_CONFIDENCE=0.6` restores v1.1.4's per-draft rule. Greedy code +4% at 5 streams, +10% at 3, +14% at 1 |
+| `TF_FLASHNEXT_SAMPLED_HEADS` / `TF_FLASHNEXT_SAMPLE_CAND` | `1` / `1` | sampled requests join the batched MTP head pass, and their top-k candidates are found on the GPU (patches 0007, 0008) |
+| `TF_FLASHNEXT_HOST_DRAW_THREADS` | `7` | worker threads for the host-side sampled draws (patch 0011); bit-identical to one thread |
+| `TF_FLASHNEXT_KEEP_LATE` | `1` | a partly rejected draft window does not replay the DeltaNet state: the kept rows wait in a log and the next verify pass applies them (patch 0012) |
+| `TF_FLASHNEXT_GATHER_EARLY` / `TF_FLASHNEXT_GATHER_READ` | `1` / `pread` | the n-gram rows of all lanes are gathered in one pass, early, and read with a `pread` thread pool instead of an `mmap` that page-faults (patches 0010, 0013). `mmap` restores the stock reader |
+| `TF_FLASHNEXT_DRAFT_AHEAD` / `TF_FLASHNEXT_WARM_AHEAD` | `1` / `1` | read ahead the n-gram rows of the draft tokens during the head step, and of the next prompt chunk during the current one |
+| `TF_FLASHNEXT_PREFILL_TAIL` | `512` | the last two prompt chunks are evened out when the last would be under this many rows |
+| `TF_FLASHNEXT_PROMPT_HC2` / `TF_FLASHNEXT_PROMPT_SHARED_DIRECT` | `1` / `1` | prompt passes run the hyper-connection read-out as two fused kernels instead of five, and the shared expert's rows go straight into the output slot (patch 0014). Bit-identical |
+| `TF_FLASHNEXT_PROMPT_EXPERT_TILE_ROWS` / `TF_FLASHNEXT_HEAD_PIECE` | `256` / `1536` | the routed experts of prompt chunks use the shared-memory row tiles from this many rows; the MTP head takes prompt pieces of this many rows (patch 0014) |
+| `TF_FLASHNEXT_PROMPT_GEMM2` | `1` | the MX128 prompt tile runs with two pipeline stages and two blocks an SM (patch 0015). Same bits, 15-25% faster per call |
+| `TF_FLASHNEXT_SHARED_SIDE` / `TF_FLASHNEXT_GDN_LANES` | `1` / `1` | the shared expert runs on a second stream in decode rounds, and a shared round takes every lane's DeltaNet rows in three launches a layer (needs `KEEP_LATE=1`) (patch 0016). Bit-identical |
 | `CHECKPOINT` | `nvfp4` | `nvfp4` serves `nvidia/Qwen3.8-Flash-Next-FP4-Local`; `int4` serves azampatti's INT4-AutoRound (sets its model id and revision). `MODEL_ID` / `MODEL_REVISION` override either |
 | `MODEL_REVISION` | `b9ce18a6…` | the checkpoint commit this recipe serves (`14642741…` with `CHECKPOINT=int4`) |
 
 The Python recipe's int8 KV is gone: KV is fp8 (or bf16). The NVIDIA checkpoint's NVFP4 n-gram table (26.8 GiB) is read from disk by the host
-(`TF_NGRAM_READ=pread` by default, with read-ahead of the next prompt chunk; `TF_FLASHNEXT_WARM_AHEAD=0` turns that off). The INT4 checkpoint's FP8 table is on the GPU.
+(`TF_FLASHNEXT_GATHER_READ=pread` by default, with read-ahead of the next prompt chunk; `TF_FLASHNEXT_WARM_AHEAD=0` turns that off). The INT4 checkpoint's FP8 table is on the GPU.
 
 ### Thinking and sampling
 
