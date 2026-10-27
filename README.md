@@ -91,7 +91,8 @@ The Python numbers come from an earlier run with its own settings, so read these
 
 ### Checks on the current build
 
-Run on the live server (one DGX Spark, defaults: 5 requests, 262,144-token window, fp8 KV, vision on), all passing:
+Run on one DGX Spark with the defaults (5 requests, 262,144-token window, fp8 KV, vision on), all passing. The sampled-exactness check and the 200k needle ran on the
+integration build with patches 0001 to 0016 (patch 0017 changes only how many drafts are proposed); the others also ran on the live container with 0017:
 
 - `tools/exact.py --pad 3000`: six drafted greedy replies (538 drafts accepted) equal the `"draft": false` ones, and six concurrent replies equal the
   one-at-a-time ones.
