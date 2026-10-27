@@ -112,6 +112,7 @@ if [[ $REBUILD -eq 1 || "$built_hash" != "$PATCHES_HASH" ]]; then
     --build-arg ZIG_VERSION="$ZIG_VERSION" --build-arg ZIG_SHA256="$ZIG_SHA256" \
     --build-arg LIBJPEG_TURBO_VERSION="$LIBJPEG_TURBO_VERSION" --build-arg LIBJPEG_TURBO_SHA256="$LIBJPEG_TURBO_SHA256" \
     --build-arg LIBWEBP_VERSION="$LIBWEBP_VERSION" --build-arg LIBWEBP_SHA256="$LIBWEBP_SHA256" \
+    --build-arg TF_RELEASE_VERSION="$TF_RELEASE_VERSION" --build-arg TF_RELEASE_AARCH64_SHA256="$TF_RELEASE_AARCH64_SHA256" \
     --build-arg PATCHES_HASH="$PATCHES_HASH" \
     -f - "$ctx" <<'DOCKERFILE'
 ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.07-py3
@@ -134,6 +135,19 @@ RUN cd /src && \
     ./configure --prefix=/opt/codecs/webp --enable-libwebpdecoder --disable-static --disable-gl --disable-sdl --disable-png --disable-jpeg --disable-tiff --disable-gif --disable-wic && \
     make -j"$(nproc)" && make install && \
     test -e /opt/codecs/webp/lib/libwebpdecoder.so.3
+
+FROM ${BASE_IMAGE} AS grammar
+ARG TF_RELEASE_VERSION
+ARG TF_RELEASE_AARCH64_SHA256
+RUN mkdir -p /opt/tfrel && cd /tmp && \
+    curl -fsSL -o tf-rel.tar.gz "https://github.com/ashhart/TensorFold/releases/download/v${TF_RELEASE_VERSION}/tensorfold-${TF_RELEASE_VERSION}-linux-aarch64.tar.gz" && \
+    echo "${TF_RELEASE_AARCH64_SHA256}  tf-rel.tar.gz" | sha256sum -c - && \
+    tar -xzf tf-rel.tar.gz -C /opt/tfrel --strip-components=1 \
+      tensorfold-${TF_RELEASE_VERSION}-linux-aarch64/lib/libtfgrammar.so \
+      tensorfold-${TF_RELEASE_VERSION}-linux-aarch64/LICENSES/xgrammar-Apache-2.0.txt \
+      tensorfold-${TF_RELEASE_VERSION}-linux-aarch64/LICENSES/xgrammar-NOTICE.txt \
+      tensorfold-${TF_RELEASE_VERSION}-linux-aarch64/LICENSES/dlpack-Apache-2.0.txt && \
+    test -s /opt/tfrel/lib/libtfgrammar.so
 
 FROM ${BASE_IMAGE} AS build
 ARG ZIG_VERSION
@@ -162,6 +176,9 @@ FROM ${BASE_IMAGE}
 COPY --from=build /opt/tensorfold /opt/tensorfold
 COPY --from=codecs /opt/codecs/jpeg/lib/libturbojpeg.so* /opt/tensorfold/lib/
 COPY --from=codecs /opt/codecs/webp/lib/libwebpdecoder.so* /opt/tensorfold/lib/
+# the engine looks for libtfgrammar.so in <binary dir>/../lib, i.e. next to native/bin
+COPY --from=grammar /opt/tfrel/lib/libtfgrammar.so /opt/tensorfold/native/lib/libtfgrammar.so
+COPY --from=grammar /opt/tfrel/LICENSES /opt/tensorfold/share/doc/tensorfold/LICENSES-grammar
 RUN ln -s /opt/tensorfold/native/bin/tensorfold-native /usr/local/bin/tensorfold-native
 ARG PATCHES_HASH
 LABEL tf.patches=${PATCHES_HASH} tf.kernels=embedded

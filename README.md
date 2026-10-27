@@ -100,6 +100,7 @@ integration build with patches 0001 to 0016 (patch 0017 changes only how many dr
 - `tools/toolcheck.py` 3/3, `tools/visioncheck.py` (the model sees the red circle and the blue square), `tools/prompt_reuse.py 30000` (every follow-up
   resumed at least 90% of its prompt, worst 99.3%).
 - A 199,730-token needle in a haystack is found, with a prefill of 100.7 s.
+- `tool_choice: "required"`, a named function, Anthropic `{"type":"any"}` and a `response_format` JSON schema each return a valid call or object (live requests).
 - `tools/context_boundary.py --context 262144`: a prompt plus reply that fills the window is admitted, with drafts on and off; one token over is refused.
 
 ## Requirements
@@ -210,7 +211,8 @@ the docker command and changes nothing.
 
 1. Preflight: Docker, disk.
 2. The image `tensorfold-qwen38:v1.1.4-eab8582`: TensorFold v1.1.4 (`TF_REF`) with every `patches/*.patch` applied, Zig 0.17.0, libjpeg-turbo and libwebp's decoder
-   (built from checksummed sources), on `nvcr.io/nvidia/pytorch:26.07-py3`; the build runs `fatbins native` only. It tries a matching prebuilt image from GitHub
+   (built from checksummed sources), on `nvcr.io/nvidia/pytorch:26.07-py3`; the build runs `fatbins native` only. `libtfgrammar.so` is copied out of TensorFold's v1.1.4 release archive
+   (SHA-256 pinned in `config.sh`). It tries a matching prebuilt image from GitHub
    Container Registry first (`PULL=0` builds locally; there is no published image for the current patch set yet).
 3. The checkpoint, at the pinned revision.
 4. A check that it is a `qwen4_exp` ModelOpt NVFP4 checkpoint and every shard present.
@@ -334,9 +336,10 @@ the model was still thinking.
   `eos_token_id`; the report saw `<|im_start|>` 248045 stop a reply too). If the model writes one while it is still thinking, for example when it quotes it in its analysis, the reply stops right there
   with `finish_reason: "stop"`, empty `content` and a cut `reasoning_content` ([#76](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/76)).
   A client can treat a `stop` with empty `content` as a failed turn and retry with `enable_thinking: false`.
-- **`tool_choice: "required"` and a named function return HTTP 400 in this image.** The engine enforces them with its grammar library, `libtfgrammar.so`, which is built from
-  [xgrammar](https://github.com/mlc-ai/xgrammar) and is not part of this recipe's image, so the server answers "libtfgrammar.so is required for structured output and required
-  tool calls". `tool_choice: "auto"` (the default) works: `tools/toolcheck.py` passes 3/3. Until the library is added, use `auto` with an instruction to call a tool.
+- **`tool_choice: "required"`, a named function and structured output** are enforced by the engine's grammar library, `libtfgrammar.so` (xgrammar), which the image takes
+  prebuilt from TensorFold's v1.1.4 release archive. With thinking off, `required` still gives the model no room to reason before the call: the grammar forces a call from the
+  first token, and the function is then picked from that start. With many tools the pick can be less relevant than under `auto`. Keep thinking on, use `auto` with an
+  instruction to call a tool, or name the function in `tool_choice`.
 
 ### API notes
 
@@ -345,12 +348,12 @@ the model was still thinking.
   and Prometheus `/metrics` (stage timers, time per output token, prefix-cache and speculative-decoding counters).
 - Refused with HTTP 400: `logprobs: true` / `top_logprobs` (no token probabilities) and `n` other than 1.
 - `"draft": false` serves the request without drafts, the serial reference.
-- Tool calls work with `tool_choice: "auto"`. `"required"`, a named function and Anthropic's `{"type": "any"}` need `libtfgrammar.so` and return HTTP 400 in this image (see above).
+- Tool calls work, including `tool_choice: "required"`, a named function and Anthropic's `{"type": "any"}`: the reply then always opens a tool call.
 - A conversation's next turn resumes from the kept state of its earlier turns, with images too (built into TensorFold v1.1.4: a changed
   image resumes only up to its first row). Video prompts are not
   kept.
-- Structured outputs (`response_format`, the `guided_*` fields) are refused with HTTP 400: they need `libtfgrammar.so`, which this image does not include (TensorFold v1.1.4
-  supports them when the library is built into the image).
+- Structured outputs (`response_format` with a JSON schema, the `guided_*` fields) are enforced with `libtfgrammar.so`; a reply follows the schema. Without the library (a hand-run
+  `tensorfold-native` that lacks it) the server answers HTTP 400.
 - When the KV pool is full, a new request is refused. Admission reserves the prompt plus `max_tokens`; the request is
   not queued. Kept prompt states share that pool: admission frees them first (built into TensorFold v1.1.4), so a request is refused
   only when it would not fit with every freeable state gone. A request whose prompt plus `max_tokens` equals `--context` is admitted: the draft rows sit past that
@@ -459,6 +462,7 @@ covers this repository's scripts only.
   ([#84](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark/pull/84)); that draft-language image is not built anymore.
 - **RoCE all-gather:** the one-shot all-gather in the engine implements the RoCEnante protocol of [b12x](https://github.com/local-inference-lab/b12x) by
   local-inference-lab; this recipe leaves it off.
+- **Grammar runtime:** [xgrammar](https://github.com/mlc-ai/xgrammar) by the MLC-AI team (Apache-2.0), shipped as `libtfgrammar.so` in TensorFold's release archive.
 - **[Zig](https://ziglang.org)** by the Zig Software Foundation and the Zig contributors; the image is based on NVIDIA's
   [PyTorch container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch).
 - **Benchmarks:** the performance numbers were measured with [sparkDash](https://github.com/MiaAI-Lab/sparkDash) by MiaAI-Lab.
