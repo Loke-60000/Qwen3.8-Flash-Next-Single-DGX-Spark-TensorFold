@@ -1,7 +1,7 @@
 <h1 align="center">Qwen3.8 Flash Next on one DGX Spark (TensorFold)</h1>
 
 <p align="center">
-  <sub>by <a href="https://x.com/MiaAI_lab">Mia'a AI Lab</a></sub>
+  <sub>by <a href="https://x.com/MiaAI_lab">Mia's AI Lab</a></sub>
   <br><br>
   <a href="https://github.com/sponsors/MiaAI-Lab" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin:0 8px;vertical-align:middle;"><img src="https://img.shields.io/badge/Sponsor%20me%20on%20GitHub-181717?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor me on GitHub" height="28" style="height:28px;width:auto;vertical-align:middle;border:0;" /></a>
   <a href="https://x.com/MiaAI_lab" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin:0 8px;vertical-align:middle;"><img src="https://img.shields.io/badge/Follow%20me%20on%20X-000000?style=for-the-badge&logo=x&logoColor=white" alt="Follow Mia on X" height="28" style="height:28px;width:auto;vertical-align:middle;border:0;" /></a>
@@ -431,12 +431,14 @@ covers this repository's scripts only.
 - **Zig CUDA serving path and CUDA family registry:** Jürgen Schmied ([jschmied](https://github.com/jschmied)), in
   [TensorFold PR #443](https://github.com/ashhart/TensorFold/pull/443)
   (commit [`59e77e8`](https://github.com/ashhart/TensorFold/commit/59e77e8f4b875ce0e863a8c896fc8e424bc539ac)).
-- **NVIDIA FP4 support in the Zig engine** (the db281878 series, patches 0011 to 0015; carried to v1.1.4 as patches 0001 to 0006 and later): MiaAI-Lab, built on TensorFold's Python implementation of the same formats by the
-  TensorFold Contributors.
-- **Free after drain and admission reclaim** (db281878 patch 0029, since built into TensorFold v1.1.4): [tempeste](https://github.com/tempeste), on TensorFold's prompt cache and lanes engine by
-  Ash Hart and the TensorFold contributors.
-- **Image prompts in the prompt cache** (db281878 patch 0030, since built into TensorFold v1.1.4): [tempeste](https://github.com/tempeste), on TensorFold's prompt cache, lane host and vision
-  input by Ash Hart and the TensorFold contributors.
+- **The 17 patches in `patches/` (0001 to 0017):** written by MiaAI-Lab (Mia's AI Lab), developed with [Claude Code](https://claude.com/claude-code), MIT License. They modify
+  TensorFold's own Flash Next CUDA engine (code by Ash Hart and the TensorFold contributors, under TensorFold's licenses). The list, patch by patch, with where each
+  idea comes from, is in [`CREDITS.md`](CREDITS.md): the vision tower (0001, 0002), fp8 KV (0003, 0005; the format adapted from MiaAI-Lab's GLM recipe patch 0038), prompt
+  expert tile and prefill (0004, 0006, 0014, 0015), sampled streams (0007 to 0011; the GPU top-k idea from MiaAI-Lab's DeepSeek recipe), rollback, `pread` n-gram reader and
+  decode (0012, 0013, 0016, 0017; 0013, 0016 and 0017 carry forward parts of the earlier db281878 series, whose NVIDIA FP4 port is by MiaAI-Lab from
+  the TensorFold Contributors' Python implementation of the same formats).
+- **Earlier db281878 series** (on `main`): free after drain and admission reclaim (patch 0029) and image prompts in the prompt cache (patch 0030) by [tempeste](https://github.com/tempeste), now built
+  into TensorFold v1.1.4; sliced fills one at a time (patch 0021) by [BadAd84](https://github.com/BadAd84) (PR #53).
 - **Model:** [Qwen3.8 Flash Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by the Qwen team (Alibaba).
 - **Default checkpoint:** NVIDIA's [FP4 QAD export](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local) (Model Optimizer).
 - **INT4 checkpoint** (served by the db281878 recipe on `main`, not by this branch): [azampatti](https://huggingface.co/azampatti)'s
