@@ -1,8 +1,9 @@
 # Per-request abliteration: one checkpoint, stock and abliterated
 
-`patches/0018-ablate.patch` teaches the Zig engine to apply an abliteration at run time, per request. The served
-checkpoint is the stock one; a request that names a second model id gets the abliterated model's reply from the same
-weights, in the same decode round as everyone else.
+`patches/0018-ablate.patch` teaches the Zig engine to apply an abliteration at run time, per request;
+`patches/0019-identities.patch` makes the list of them data: every model id in `TENSORFOLD_IDENTITIES` is an identity
+with a directions file of its own. The served checkpoint is the stock one; a request that names an identity gets that
+abliterated model's reply from the same weights, in the same decode round as everyone else.
 
 ## Why it is exact
 
@@ -16,7 +17,7 @@ from each edited writer's output, for the rows whose request asked for it, befor
 - the shared expert's down projection, its own last slot of the MoE output before the router's gate (or its output
   read in place on prompt chunks), with `lam_shared`
 
-from `first_layer` up. The MTP draft head is untouched; the main forward verifies its drafts.
+from the identity's `first_layer` up. The MTP draft head is untouched; the main forward verifies its drafts.
 
 A baked checkpoint requantises the edited writers (MXFP8 here), so it is close to, not bit-equal with, the run-time
 correction on the stock weights.
@@ -25,28 +26,34 @@ correction on the stock weights.
 
 | Setting | Meaning |
 |---|---|
-| `TENSORFOLD_ABLATE` | path inside the container of a safetensors file: `directions` [k, d] fp32 (orthonormal rows, k <= 4), `lam_attn` [k], `lam_shared` [k] fp32, `first_layer` [1] int64 |
-| `TENSORFOLD_ABLATE_MODEL` | the model id that turns the ablation on for a request; `/v1/models` lists it (no `--alias` needed) |
-| `TENSORFOLD_ABLATE_SCALE` | multiplies both strengths (default 1), for tuning runs |
+| `TENSORFOLD_IDENTITIES` | the identities, `id=path` entries separated by commas (at most 32): the model id a request names and the path inside the container of its safetensors file, `directions` [k, d] fp32 (orthonormal rows, k <= 4), `lam_attn` [k], `lam_shared` [k] fp32, `first_layer` [1] int64. `/v1/models` lists every id (no `--alias` needed) |
+| `TENSORFOLD_ABLATE`, `TENSORFOLD_ABLATE_MODEL` | one identity the short way (the file, the model id); read only while `TENSORFOLD_IDENTITIES` is unset |
+| `TENSORFOLD_ABLATE_SCALE` | multiplies every identity's strengths (default 1), for tuning runs |
 
 `start.sh` passes every `TENSORFOLD_*` variable into the container and mounts the Hugging Face cache at
 `/root/.cache/huggingface`, so a file under `~/.cache/huggingface/ablate/` needs no extra mount:
 
 ```bash
-TENSORFOLD_ABLATE=/root/.cache/huggingface/ablate/lr7-skuld.safetensors TENSORFOLD_ABLATE_MODEL=abliterated ./start.sh
+TENSORFOLD_IDENTITIES="abliterated=/root/.cache/huggingface/ablate/lr7-skuld.safetensors,abliterated-lr7=/root/.cache/huggingface/ablate/lr7.safetensors" \
+  ./start.sh
 ```
+
+The engine numbers the identities in the list's order (1..n; 0 is the stock model) and logs one `identity i id: ...`
+line each at load; a file that fails its checks stops the load with the reason.
 
 ## Behaviour
 
-- Requests without the model id are unchanged byte for byte: the kernel returns before reading a row whose mask is
-  0. With `TENSORFOLD_ABLATE` unset nothing is launched.
-- The per-row mask is uploaded with the token ids before each pass, from the pinned staging the ids use.
-- Ablated requests have prompt reuse of their own: the lane host keys kept states by the prompt's tokens, and an
-  ablated request's key carries the mode in its first word (marked the way an image frame marks it), so a
-  conversation's next abliterated turn resumes its last abliterated state and the two modes never resume each other's (their
-  states differ). `zig/src/core/lane_host_reuse_test.zig` covers it.
+- Requests naming no identity are unchanged byte for byte: the kernel returns before reading a row whose identity is
+  0. With no identity listed nothing is launched.
+- Each row's identity is uploaded with the token ids before each pass, from the pinned staging the ids use; every
+  identity's directions sit in one device table (about 40 KiB each), so adding one costs nothing per request.
+- Each identity has prompt reuse of its own: the lane host keys kept states by the prompt's tokens, and a request's
+  key carries its identity in its first word (marked the way an image frame marks it), so a conversation's next abliterated
+  turn resumes its last abliterated state and no two identities, nor an identity and the stock model, ever resume each
+  other's states (they differ). `zig/src/core/lane_host_reuse_test.zig` covers it.
 - Two ranks (TP=2) are refused at load. `--parallel 1` works.
-- The server refuses to start when `TENSORFOLD_ABLATE_MODEL` is set but the engine did not load `TENSORFOLD_ABLATE`.
+- The server refuses to start when identities are listed but the engine did not load them, and when the list is
+  malformed, names an id twice, or has more than 32 entries.
 
 ## Files
 
