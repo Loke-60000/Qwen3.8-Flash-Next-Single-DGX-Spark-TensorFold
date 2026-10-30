@@ -75,6 +75,20 @@ recipe now carries seventeen patches on v1.1.4 (`patches/0001` to `0017`):
 - Already in v1.1.4 and dropped from our series: image-prompt reuse (#5), random seeds without a `seed` (`--prompt-seed` restores prompt-keyed seeds), supersede-style cache eviction, the free-after-drain fix for #67. Checkpoint `CHECKPOINT=int4` is not supported by this engine.
 - Measured on one Spark against the previous build (db281878 + the old patches), 5 streams, 300 tokens, same prompts: greedy prose 100.6 vs 110.7 tok/s (distinct prompts), sampled prose 91.7 vs 100.8, 1 stream sampled 38.6 vs 37.3 (faster); prefill 1,713 / 1,964 tok/s at 3k / 13k tokens vs 2,223 / 2,312. v1.1.4 is 10 to 15% behind the previous build at 5 streams and 10 to 15% behind on prefill, and ahead at 1 stream. `tools/exact.py`, `toolcheck.py`, `visioncheck.py`, `prompt_reuse.py` and a 200k needle all pass. The earlier "193 tok/s at 5 streams" came from 5 identical prompts.
 
+**Triage fixes (2026-10-30): a failed n-gram read, `stop.sh`, and the prefill benchmark's cache guard.**
+
+- Patch `0013`: when a `pread` of the n-gram table failed, `Ngram.fill` returned from the whole gather, so the rows after the failed one kept whatever the output
+  buffer held and the reply was computed from the wrong n-gram embeddings, with no error. It now takes that one row from the mapping and goes on. Only the error path
+  changes; a read that succeeds takes the same code as before. Reported by [slogonomo](https://github.com/slogonomo) (#83). Test, in the patch (`cuda_ple_reader_test.zig`): it
+  fails every read of one shard and compares the gathered rows with the mapped ones; before the fix the rows after the first failure came back unwritten. The image hash changes (the patch text did), so
+  `scripts/prepare.sh` builds the image locally until a prebuilt one is published.
+- `stop.sh` no longer evaluates what `/health` answers. It compared the `running` value in `(( ... ))`, where bash runs a command inside an array subscript (`HOME[$(cmd)]`) as the user
+  who ran `stop.sh`, and a value that was not a number (a boolean, a name) stopped `stop.sh` before it stopped the container. The count is now read as a non-negative integer in Python and checked
+  again in bash; anything else counts as 0. Reported by [slogonomo](https://github.com/slogonomo) (#82). Test: `tools/test_stop_health.py`.
+- `tools/bench_streams.py` and `tools/bench.py` no longer stop on v1.1.4: every prompt starts with the same 44 tokens of the chat template, which the engine resumes from, so `cached == 0` never held. A prompt
+  counts as fresh while it reuses at most 256 tokens; a real prompt-cache hit still stops the run. The prefill rate is the tokens actually prefilled (prompt minus cached) over the
+  server's prefill seconds, and `bench_streams.py` prints `cached` on each row. Reported by [zankie](https://github.com/zankie) (#86). Test: `tools/test_bench_stats.py` runs `bench_streams.py` against a fake server.
+
 **Triage of the open pull requests and issues (2026-10-25): two ports, one new setting and README notes.**
 
 - `patches/0021-flash-next-sliced-fill-one-at-a-time.patch`, from [BadAd84](https://github.com/BadAd84)'s PR #53 and hand-rebased onto the FP4 engine tree: with

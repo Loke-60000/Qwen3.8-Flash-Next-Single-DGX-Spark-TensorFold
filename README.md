@@ -44,6 +44,14 @@ window, 5 requests at once, fp8 KV, vision on, MTP drafts, TensorFold v1.1.4 wit
 them). Prose: temperature 0.7, thinking on. Code: temperature 0, thinking off. Aggregate is the sum of the per-request decode speeds; TTFT is the
 time to the first token.
 
+How a decode figure is taken (sparkDash's `DecodeBench`): each request streams, and its decode speed is `(completion_tokens - 1) / (time of the last streamed token - time of
+the first)`, so TTFT is not in it. The prose prompt asks for a step-by-step explanation of how a hash map works. The code prompts (`DECODE_CODE_TASKS` in sparkDash's
+`src/shared/llmPrompts.js`) each name a small Python function or class and end "Output only Python source. No comments, no docstrings, no markdown fences. Then add tests and the helpers this
+needs. Keep writing code.", and every concurrent stream gets a different task. MTP drafts pay only when they are accepted, so decode speed depends on the text: a code request that asks for docstrings and
+comments, or a different prose prompt, decodes at another speed, and a figure from another harness is comparable only with the same prompts, sampling and thinking setting. `tools/bench_streams.py`
+uses its own, shorter prompts and does not turn thinking off for code, so its code rows are not comparable with the table's ([#85](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/85),
+[#86](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/86)).
+
 **Decode, prose**
 
 | Concurrent requests | Aggregate | Per request | TTFT |
@@ -251,6 +259,11 @@ peaks around 0.9-1.7 GiB). It follows the free memory at start (other containers
 on the starts above). A `PARALLEL` whose windows do not all fit is refused at start: `PARALLEL=8` at 262,144 tokens needs 38.27 GiB and the server answered
 "the CUDA memory budget leaves 27.22 GiB". Within the pool, a request is admitted when its prompt plus its reply budget (`max_tokens`) fits beside the others;
 one that does not fit is refused, not queued.
+
+**The prompt cache is a cap, not a reservation.** On CUDA the prompt cache takes at most what the weights and the streams leave, so `--prompt-cache-gib` (pass it after the defaults:
+`./start.sh restart --prompt-cache-gib 12`) can only lower the 3.4 to 5.1 GiB above, never raise it: at 5 streams a larger value changes nothing, and it binds only when the leftover is bigger
+(a smaller `PARALLEL` or `--context`). `--prompt-cache-over-cap` is refused on CUDA (it lifts a Mac's 70% cap). A larger cache for long multi-turn prompts costs streams or
+window length: `PARALLEL=4` leaves one window's 4.78 GiB more for the cache than five do ([#81](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/81)).
 
 `PARALLEL=6` at 262,144 tokens (28.7 GiB) fits only with a smaller reserve. We tried `TENSORFOLD_MEMORY_RESERVE_GIB=7`: it started ("28.9 GiB left after a 7.0 GiB
 reserve"), `tools/exact.py`, `toolcheck.py` and `visioncheck.py` passed and decode speed was unchanged, but the prompt cache fell to 0.2 GiB and
