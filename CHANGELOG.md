@@ -5,6 +5,12 @@ Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:
 
 ## Unreleased
 
+**2026-10-30: `ABLIT` (new, off by default).** `ABLIT=1` serves NVIDIA's FP4 checkpoint with drowzeys's Keys house-qsa abliteration overlay
+(`drowzeys/keys-Qwen3.8-Flash-Next-NVFP4-FP4-QAD-house-qsa-L3-47` @ `c44f5b92`): `self_attn.o_proj` of the 12 attention (QSA) layers (L3 to L47), from a
+~190 MB sidecar. `scripts/prepare.sh` downloads the sidecar (the overlay is gated: `HF_TOKEN`) and `scripts/ablit_view.py` builds a folder of symlinks to the stock snapshot plus the
+sidecar, with an index that maps the 24 names to it; the stock checkpoint is not modified. Folder builder checked against the real sidecar and the stock index and shard header
+(`tools/test_ablit_view.py` offline); a server booted from the overlaid folder on a Spark and answered `/health` (v1.1.4, CUDA); no exactness, needle or refusal run on it yet. `ABLIT=0` changes nothing: the prepared-state marker only gains a field when `ABLIT=1`.
+
 **Measured gains of the v1.1.4 build (patches 0001 to 0017) over the db281878 build (patches 0001 to 0015), sparkDash on the same Spark, 2026-10-27.**
 The "before" numbers are the sparkDash tables the README carried (db281878 + patches, patch 0014 era); the "after" numbers are a new sparkDash run on the
 v1.1.4 build. Prose was run at temperature 0.7 with thinking on, code at temperature 0 with thinking off; the README did not record the earlier run's
