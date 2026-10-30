@@ -221,7 +221,7 @@ the docker command and changes nothing.
 2. The image `tensorfold-qwen38:v1.1.4-eab8582`: TensorFold v1.1.4 (`TF_REF`) with every `patches/*.patch` applied, Zig 0.17.0, libjpeg-turbo and libwebp's decoder
    (built from checksummed sources), on `nvcr.io/nvidia/pytorch:26.07-py3`; the build runs `fatbins native` only. `libtfgrammar.so` is copied out of TensorFold's v1.1.4 release archive
    (SHA-256 pinned in `config.sh`). It tries a matching prebuilt image from GitHub
-   Container Registry first (`PULL=0` builds locally; there is no published image for the current patch set yet).
+   Container Registry first, by digest (`PULL=0` builds locally; the published image of the current patch set is `v1.1.4-eab8582-4baf16137ecd`, also `:latest`).
 3. The checkpoint, at the pinned revision.
 4. A check that it is a `qwen4_exp` ModelOpt NVFP4 checkpoint and every shard present.
 

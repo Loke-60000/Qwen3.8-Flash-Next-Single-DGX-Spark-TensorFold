@@ -65,8 +65,9 @@ image_hash() {
   ) | sha256sum | cut -c1-12
 }
 GHCR_IMAGE="${GHCR_IMAGE:-ghcr.io/miaai-lab/qwen3.8-flash-next-single-dgx-spark-tensorfold}"
-IMAGE_TAG="${IMAGE_TAG:-}"
-IMAGE_DIGEST="${IMAGE_DIGEST:-}"
+# The published image of the current patch set (scripts/publish-image.sh, 2026-10-30): prepare.sh pulls it by digest while the patch hash matches IMAGE_TAG.
+IMAGE_TAG="${IMAGE_TAG:-v1.1.4-eab8582-4baf16137ecd}"
+IMAGE_DIGEST="${IMAGE_DIGEST:-sha256:5c6c42b9747318c1cd8b6cb85cb69493fff2e82cb23b61e49b9cf54cd09ac28e}"
 prebuilt_image() {
   local tag="${TF_TAG}-$(image_hash)"
   if [[ "$tag" == "$IMAGE_TAG" && -n "$IMAGE_DIGEST" ]]; then echo "$GHCR_IMAGE@$IMAGE_DIGEST"; else echo "$GHCR_IMAGE:$tag"; fi
