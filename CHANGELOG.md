@@ -1,9 +1,93 @@
 # Changelog
 
-Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:zig-db28187`, built by
-`scripts/prepare.sh` from TensorFold `db281878` plus `patches/`.
+Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:v1.2.2-00e7ddd`, built by
+`scripts/prepare.sh` from TensorFold v1.2.2 plus `patches/`.
 
 ## Unreleased
+
+**2026-11-05: TensorFold v1.2.2 (`00e7dddb`), with the patch series re-implemented on it.**
+
+- `TF_REF` is v1.2.2; the image is `tensorfold-qwen38:v1.2.2-00e7ddd`, and `libtfgrammar.so` comes from the v1.2.2 release archive (SHA-256 pinned in `config.sh`). No image of
+  this series is published yet: `IMAGE_TAG` and `IMAGE_DIGEST` are empty, and `scripts/prepare.sh` builds locally when the tag of this patch set is not in the registry.
+- Removed, now part of v1.2.2: `0007` (sampled streams in the batched MTP head pass, same mechanism and knob) and `0012` (a partly kept window's DeltaNet rows applied at the
+  start of the next window, TensorFold #1763). `TF_FLASHNEXT_SAMPLED_HEADS` and `TF_FLASHNEXT_KEEP_LATE` are on by default upstream (anything but `0`); `config.sh` still sets both to 1.
+- Re-implemented on v1.2.2's code, with what v1.2.2 has used instead of duplicated:
+  - `0003`: v1.2.2 has the `--kv-cache fp8` plumbing but refused it for Flash Next on CUDA. The format and kernels are ported; an fp8 engine loads the fp8 twin of each cache kernel.
+  - `0004`: v1.2.2 has the K32 prompt expert tile (from MiaAI-Lab, opt-in); the patch makes it the default at one GPU, from `TF_FLASHNEXT_PROMPT_EXPERT_TILE_ROWS` rows, and refuses
+    bad values at load. Passes of 64 rows up to that take v1.2.2's K64 prompt form instead of the decode kernel. `TF_FLASHNEXT_PROMPT_EXPERT_TILE_CFG` is gone.
+  - `0005`: the fp8 reader's read-ahead, now also in the paged and lane kernels, and `TF_FLASHNEXT_DRAFT_HEAD=affine4` by default. The head cache moved to `0021`.
+  - `0006`: v1.2.2's own vectorised hyper-connection kernels and zero fills replace ours; no drain between prompt chunks, the 128x128 MXFP8 prompt tile and the
+    3,072-row chunk (`TF_FLASHNEXT_CHUNK`, upstream 1,536) stay.
+  - `0008` to `0011`: unchanged in what they do. `0010` uses v1.2.2's distinct-row gather; `TF_FLASHNEXT_GATHER_LOCK_SCALES` and the join-wait lines of
+    `TF_FLASHNEXT_GATHER_LOG` are gone.
+  - `0013`: v1.2.2 reads n-gram rows with buffered `pread` by default (`TF_FLASHNEXT_PLE_IO`), through the page cache, where they stay. Our reader still reads them past the page
+    cache into a 256 MiB row cache; a `TF_FLASHNEXT_GATHER_READ` other than `pread` now means v1.2.2's reader (the mapping only with `TF_FLASHNEXT_PLE_IO=mmap`).
+  - `0014`: `TF_FLASHNEXT_HC2_DN` and `TF_FLASHNEXT_HC2_UP` are gone. `TF_FLASHNEXT_HEAD_PIECE` is capped at a quarter of the chunk (768 rows at the 3,072-row chunk;
+    half on v1.1.4): v1.2.2 sizes the prompt scratch by use, and the head's hidden branch runs four hyper-connection streams' rows through it. `config.sh` still sets 1536.
+  - `0016`: the shared expert's side stream is v1.2.2's own (#1763, `TF_FLASHNEXT_SHARED_SIDE` on by default upstream; our value `2`, `_PRIO` and `_POISON` are gone).
+    The lane-batched DeltaNet layers (`TF_FLASHNEXT_GDN_LANES`) are ported onto v1.2.2's log layout, up to 16 lanes a launch.
+  - `0017`: the running-product stop rule; `TF_FLASHNEXT_COPY_LOG` is gone.
+  - `0018` to `0020`: identities. An identity id equal to the served name or an alias is now refused at start (v1.1.4 served it abliterated), and so is a `first_layer`
+    past the last layer. A pass whose rows ask for no identity launches nothing.
+- New `0021`: under `--kv-cache fp8` the MTP head's own cache stays bf16 (`TF_FLASHNEXT_HEAD_KV=bf16`, the default; `fp8` keeps it fp8, other values are refused at load).
+  It is one format for every stream, where v1.1.4 picked fp8 for streams within a twentieth of the full window. 992 bytes a position more: 18,880 bytes a token, 5.07 GiB a
+  262,144-token stream instead of 4.83.
+- Memory at start, same Spark, vision on, `PARALLEL=5`, a 4 GiB reserve: "model 74.70 GiB; 5 streams at once, 5.07 GiB each at a 262144-token window (fp8 caches), of 26.8 GiB
+  left after a 4.0 GiB reserve; prompts in passes of up to 3072 rows, a 1.5 GiB prompt cache" (26.0 GiB and 0.6 GiB on another start). The v1.1.4 build: model 75.92 GiB,
+  4.78 GiB each, 27.6 to 29.1 GiB left, a 3.7 to 5.2 GiB prompt cache. With `TF_FLASHNEXT_HEAD_KV=fp8`: 4.83 GiB each, 26.7 GiB left, a 2.6 GiB prompt cache. The weights
+  loaded in 45 s (the v1.1.4 build: 179 s on the restart after the same window).
+
+Measured on the same DGX Spark (GB10) in the production shape (5 x 262,144, fp8 KV, vision on, MTP drafts, three identities loaded), `tools/bench_streams.py`: greedy,
+256 tokens a request, median of 3. Before is v1.1.4 with patches `0001` to `0020`, after is v1.2.2 with this series. Gain is (after / before - 1); for TTFT a negative
+number is better.
+
+Decode, prose (total tok/s / per request tok/s / TTFT ms):
+
+| Concurrent requests | Before | After | Total | Per request | TTFT |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 55.7 / 55.7 / 87 | 53.4 / 53.4 / 68 | **-4.1%** | -4.1% | -21.8% |
+| 2 | 105.9 / 53.0 / 154 | 102.9 / 51.5 / 103 | **-2.8%** | -2.8% | -33.1% |
+| 3 | 128.6 / 42.9 / 229 | 144.3 / 48.1 / 135 | **+12.2%** | +12.1% | -41.0% |
+| 4 | 147.9 / 37.0 / 309 | 182.0 / 45.5 / 170 | **+23.1%** | +23.0% | -45.0% |
+| 5 | 165.2 / 33.0 / 386 | 226.5 / 45.3 / 215 | **+37.1%** | +37.3% | -44.3% |
+
+Decode, code:
+
+| Concurrent requests | Before | After | Total | Per request | TTFT |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 47.5 / 47.5 / 85 | 45.2 / 45.2 / 68 | **-4.8%** | -4.8% | -20.0% |
+| 2 | 77.7 / 38.9 / 154 | 92.2 / 46.1 / 102 | **+18.7%** | +18.5% | -33.8% |
+| 3 | 101.0 / 33.7 / 220 | 124.3 / 41.4 / 135 | **+23.1%** | +22.8% | -38.6% |
+| 4 | 120.7 / 30.2 / 300 | 167.5 / 41.9 / 170 | **+38.8%** | +38.7% | -43.3% |
+| 5 | 137.4 / 27.5 / 380 | 197.6 / 39.5 / 202 | **+43.8%** | +43.6% | -46.8% |
+
+Prefill, cold prompts (tok/s / TTFT s; the prompt lengths differ by a few tokens between the runs):
+
+| Prompt | Before | After | Prefill | TTFT |
+| ---: | ---: | ---: | ---: | ---: |
+| 4k | 2,396 / 1.66 | 2,367 / 1.68 | **-1.2%** | +1.2% |
+| 8k | 2,540 / 3.13 | 2,553 / 3.10 | **+0.5%** | -1.0% |
+| 16k | 2,557 / 6.17 | 2,599 / 6.08 | **+1.6%** | -1.5% |
+| 32k | 2,567 / 12.28 | 2,520 / 12.53 | **-1.8%** | +2.0% |
+| 64k | 2,515 / 25.06 | 2,470 / 25.53 | **-1.8%** | +1.9% |
+| 128k | 2,395 / 52.58 | 2,398 / 52.50 | **+0.1%** | -0.2% |
+
+Mean of the rows: prose total +13.1%, code total +23.9%, prefill -0.4%. Not a gain: one request (-4.1% prose, -4.8% code), two requests' prose (-2.8%), and
+the 4k, 32k and 64k prefill points (-1.2% to -1.8%). A single request measured sparkDash-style (400 tokens, three runs, median; prose at temperature 0.7 with thinking on,
+code at temperature 0 with thinking off): code 90.5 -> 93.7 tok/s (+3.5%), prose 51.6 -> 47.5 (-7.9%; single prose readings spread 47.5 to 60.3 before and 45.9 to 59.4 after).
+sparkDash itself was not run.
+- With `TF_FLASHNEXT_HEAD_KV=fp8` (the head cache in fp8 too), against the default: 5 streams prose 206.8 tok/s (-8.7%), code 180.8 (-8.5%); 1 stream prose 49.3 (-7.7%),
+  code 44.7 (-1.1%); single code request 77.3 tok/s (-17.5%), prose 49.9 (+5.1%, within its spread).
+- On the way, same harness: v1.2.2 with `0001` to `0003` only decoded prose at 38.2 / 141.6 tok/s at 1 / 5 streams, code at 36.1 / 134.5, and prefilled at 1,875 to 1,997 tok/s;
+  with `0001` to `0009`, prose 46.8 / 170.8, code 37.8 / 139.2, prefill 2,130 to 2,280. The later patches carry the speed.
+- Checks on the after build, all passing: `tools/exact.py` (six drafted greedy replies, 545 drafts accepted, equal the `"draft": false` ones; six concurrent equal the
+  one-at-a-time ones), `toolcheck.py` 3/3, `visioncheck.py`, `prompt_reuse.py 30000 3` (worst 99.3%), `verify_ablate.py` with the stock id and the three identities (same
+  greedy replies cold and resumed, each id from its own state), and `tf-cuda-test` `flashnext-kv8`, `hc-fuse`, `flashnext-gdn-lanes`, `flashnext-cand`, `nvfp4-fact`,
+  `flashnext-attn`, `flashnext-hc`, `flashnext-draft-affine`, `flashnext-shared`, `flashnext-fp8-experts`, `lane-half` and `flashnext-pages`. Not run yet on v1.2.2:
+  the sampled-exactness check, the 200k needle, forced and structured outputs on live requests, `tools/context_boundary.py`, and `ABLIT=1`.
+- README: v1.2.2 throughout; the performance tables are the `bench_streams.py` before and after above (the v1.1.4 sparkDash tables stay in the entry below); KV and memory
+  numbers of this build; the patch table and knob table for the new series. Removed: the 1,048,576-token window (`start.sh` refuses past 262,144, as it did on v1.1.4) and
+  the n-gram table read "through the page cache" (patch `0013` reads it past the page cache).
 
 **2026-10-30: `ABLIT` (new, off by default).** `ABLIT=1` serves NVIDIA's FP4 checkpoint with drowzeys's Keys house-qsa abliteration overlay
 (`drowzeys/keys-Qwen3.8-Flash-Next-NVFP4-FP4-QAD-house-qsa-L3-47` @ `c44f5b92`): `self_attn.o_proj` of the 12 attention (QSA) layers (L3 to L47), from a

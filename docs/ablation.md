@@ -78,9 +78,13 @@ docker run --rm -v ~/.cache/huggingface:/root/.cache/huggingface -v "$PWD":/w nv
 ## Behaviour
 
 - Each identity keeps prompt states of its own: a conversation's next turn resumes its own identity's state, never the
-  stock model's or another identity's. `zig/src/core/lane_host_reuse_test.zig` covers it.
+  stock model's or another identity's. The server marks the request with the identity its `model` names
+  (`Request.named`, kept in `Request.identity`), which also changes its prompt-cache key.
+  `zig/src/core/lane_host_identity_test.zig` covers it.
+- A pass whose rows name no identity launches nothing extra, and an identity's kernels run only at the layers it edits.
 - Two ranks (TP=2) are refused at load.
-- The server refuses to start when the list is malformed, names an id twice, or has more than 32 entries.
+- The server refuses to start when the list is malformed, names an id twice, has more than 32 entries, or uses the served
+  name or an alias as an identity id, and the load stops on a `first_layer` past the last layer (47).
 
 ## Checks
 
