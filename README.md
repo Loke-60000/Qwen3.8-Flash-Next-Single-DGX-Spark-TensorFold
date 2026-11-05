@@ -275,7 +275,7 @@ loses about a fifth of its accepted drafts, and decode at five requests is about
 **Total available KV cache with the default checkpoint (NVIDIA FP4): about 26 to 27 GiB on our Spark, roughly 1.3 to 1.4 million fp8 tokens.** That is the pool the
 engine reports at start, measured with vision on, `PARALLEL=5` and `TENSORFOLD_MEMORY_RESERVE_GIB=4`, from 108 GiB of `MemAvailable`: "model 74.70 GiB; 5 streams at once,
 5.07 GiB each at a 262144-token window (fp8 caches), of 26.8 GiB left after a 4.0 GiB reserve; prompts in passes of up to 3072 rows, a 1.5 GiB prompt cache" (26.0 GiB
-left and a 0.6 GiB prompt cache on another start). The engine counts 5.07 GiB for each stream at a 262,144-token window (4.83 GiB with `TF_FLASHNEXT_HEAD_KV=fp8`,
+and 0.6 GiB on a test start, 27.7 GiB and 2.3 GiB on the production start with every lab service stopped). The engine counts 5.07 GiB for each stream at a 262,144-token window (4.83 GiB with `TF_FLASHNEXT_HEAD_KV=fp8`,
 4.78 GiB on v1.1.4). Loading the weights takes about 81 GiB of memory (the 26.8 GiB NVFP4 n-gram table stays on disk: patch `0013` reads its rows with `pread`
 past the page cache into a 256 MiB row cache). The pool is `MemAvailable` after the weights load, minus `TENSORFOLD_MEMORY_RESERVE_GIB` (9 GiB by default), and with
 `VISION=1` minus 2 GiB kept for the helper (`TENSORFOLD_VISION_WORKSPACE_MIB`; the tower peaks around 0.9-1.7 GiB). It follows the free memory at start (other
@@ -283,13 +283,13 @@ containers on the machine shrink it), and each GiB less reserve adds a GiB to it
 than five full windows take, so `PARALLEL=5` needs about 112 GiB of `MemAvailable` at start with the defaults (calculated from that start, not run).
 `VISION=0` returns the 2 GiB helper workspace to the pool.
 
-**Every stream gets a full window when the server starts.** Five windows take 25.4 GiB, and what is left of the pool is the prompt cache (0.6 and 1.5 GiB on
+**Every stream gets a full window when the server starts.** Five windows take 25.4 GiB, and what is left of the pool is the prompt cache (0.6 to 2.3 GiB on
 the starts above; the v1.1.4 build left 3.7 to 5.2 GiB on the same Spark, and `TF_FLASHNEXT_HEAD_KV=fp8` leaves 2.6 GiB). A `PARALLEL` whose windows do not all fit
 is refused at start: at 262,144 tokens `PARALLEL=6` needs 30.4 GiB and `PARALLEL=8` 40.6 GiB. Within the pool, a request is admitted when its prompt plus its
 reply budget (`max_tokens`) fits beside the others; one that does not fit is refused, not queued.
 
 **The prompt cache is a cap, not a reservation.** On CUDA the prompt cache takes at most what the weights and the streams leave, so `--prompt-cache-gib` (pass it after the defaults:
-`./start.sh restart --prompt-cache-gib 12`) can only lower the 0.6 to 1.5 GiB above, never raise it: at 5 streams a larger value changes nothing, and it binds only when the leftover is bigger
+`./start.sh restart --prompt-cache-gib 12`) can only lower the 0.6 to 2.3 GiB above, never raise it: at 5 streams a larger value changes nothing, and it binds only when the leftover is bigger
 (a smaller `PARALLEL` or `--context`). `--prompt-cache-over-cap` is refused on CUDA (it lifts a Mac's 70% cap). A larger cache for long multi-turn prompts costs streams or
 window length: `PARALLEL=4` leaves one window's 5.07 GiB more for the cache than five do ([#81](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/81)).
 For more streams, lower `CONTEXT`: eight streams at 131,072 tokens need about 22 GiB (calculated from the sizes above, not run).

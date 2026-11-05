@@ -33,7 +33,7 @@ Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:
   It is one format for every stream, where v1.1.4 picked fp8 for streams within a twentieth of the full window. 992 bytes a position more: 18,880 bytes a token, 5.07 GiB a
   262,144-token stream instead of 4.83.
 - Memory at start, same Spark, vision on, `PARALLEL=5`, a 4 GiB reserve: "model 74.70 GiB; 5 streams at once, 5.07 GiB each at a 262144-token window (fp8 caches), of 26.8 GiB
-  left after a 4.0 GiB reserve; prompts in passes of up to 3072 rows, a 1.5 GiB prompt cache" (26.0 GiB and 0.6 GiB on another start). The v1.1.4 build: model 75.92 GiB,
+  left after a 4.0 GiB reserve; prompts in passes of up to 3072 rows, a 1.5 GiB prompt cache" (26.0 and 0.6 GiB on a test start, 27.7 and 2.3 GiB on the production start). The v1.1.4 build: model 75.92 GiB,
   4.78 GiB each, 27.6 to 29.1 GiB left, a 3.7 to 5.2 GiB prompt cache. With `TF_FLASHNEXT_HEAD_KV=fp8`: 4.83 GiB each, 26.7 GiB left, a 2.6 GiB prompt cache. The weights
   loaded in 45 s (the v1.1.4 build: 179 s on the restart after the same window).
 
