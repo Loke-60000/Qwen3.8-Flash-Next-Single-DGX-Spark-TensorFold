@@ -275,7 +275,7 @@ loses about a fifth of its accepted drafts, and decode at five requests is about
 **Total available KV cache with the default checkpoint (NVIDIA FP4): about 26 to 27 GiB on our Spark, roughly 1.3 to 1.4 million fp8 tokens.** That is the pool the
 engine reports at start, measured with vision on, `PARALLEL=5` and `TENSORFOLD_MEMORY_RESERVE_GIB=4`, from 108 GiB of `MemAvailable`: "model 74.70 GiB; 5 streams at once,
 5.07 GiB each at a 262144-token window (fp8 caches), of 26.8 GiB left after a 4.0 GiB reserve; prompts in passes of up to 3072 rows, a 1.5 GiB prompt cache" (26.0 GiB
-and 0.6 GiB on a test start, 27.7 GiB and 2.3 GiB on the production start with every lab service stopped). The engine counts 5.07 GiB for each stream at a 262,144-token window (4.83 GiB with `TF_FLASHNEXT_HEAD_KV=fp8`,
+and 0.6 GiB on a test start, 27.7 GiB and 2.3 GiB on the production start). The engine counts 5.07 GiB for each stream at a 262,144-token window (4.83 GiB with `TF_FLASHNEXT_HEAD_KV=fp8`,
 4.78 GiB on v1.1.4). Loading the weights takes about 81 GiB of memory (the 26.8 GiB NVFP4 n-gram table stays on disk: patch `0013` reads its rows with `pread`
 past the page cache into a 256 MiB row cache). The pool is `MemAvailable` after the weights load, minus `TENSORFOLD_MEMORY_RESERVE_GIB` (9 GiB by default), and with
 `VISION=1` minus 2 GiB kept for the helper (`TENSORFOLD_VISION_WORKSPACE_MIB`; the tower peaks around 0.9-1.7 GiB). It follows the free memory at start (other

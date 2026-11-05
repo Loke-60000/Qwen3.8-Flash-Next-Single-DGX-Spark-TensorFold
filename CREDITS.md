@@ -47,7 +47,7 @@ license files from the pinned checkout.
   The Flash Next CUDA engine in this recipe is ported from TensorFold's Python Flash Next CUDA engine, written by
   Ash Hart and the TensorFold contributors ([contributors](https://github.com/ashhart/TensorFold/graphs/contributors));
   their authorship is recorded in TensorFold's history.
-- **The 17 patches in `patches/` (0001 to 0017) on TensorFold v1.1.4 are written by MiaAI-Lab** (Mia's AI Lab,
+- **The patches in `patches/` (0001 to 0017, and 0021) on TensorFold v1.2.2 are written by MiaAI-Lab** (Mia's AI Lab,
   [MiaAI-Lab](https://github.com/MiaAI-Lab)), under this
   repository's MIT License. They modify TensorFold's own Flash Next CUDA engine, which is by Ash Hart and the TensorFold
   contributors; that code keeps TensorFold's licenses (see `NOTICE`). Patch by patch:
@@ -56,31 +56,33 @@ license files from the pinned checkout.
   - `0003-kv-cache-fp8`: `--kv-cache fp8` for Flash Next, so five full 262,144-token windows fit. MiaAI-Lab; the format is adapted from
     MiaAI-Lab's GLM recipe patch `0038-glm-kv-fp8` in
     [GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold).
-  - `0004-prompt-expert-tile`: the shared-memory prompt expert tile for NVFP4 routed experts, and the build fixes for v1.1.4's `install` step.
+  - `0004-prompt-expert-tile`: the shared-memory prompt expert tile for NVFP4 routed experts, carried onto v1.2.2's own K32 tile as its default at one rank.
     MiaAI-Lab, following the staging idea of the earlier Python engine's expert kernel (TensorFold Contributors).
   - `0005-decode-fp8-reader-and-head-cache`: fp8 attention reader that keeps the next tile in registers; the MTP head's 4-bit-row cache. MiaAI-Lab.
   - `0006-prefill-speed`: no drain between prompt chunks, no zero fill of the fp32 `y` buffer, vectorised hyper-connection kernels, 128x128 MXFP8
     prompt tile, 3072-row chunks. MiaAI-Lab.
-  - `0007-sampled-streams-in-the-batched-head`: sampled requests join the batched draft pass. MiaAI-Lab.
+  - `0007-sampled-streams-in-the-batched-head` (sampled requests join the batched draft pass): upstream since TensorFold v1.2.2, no longer in `patches/`.
   - `0008-sampled-gpu-top-k-candidates`: the row's k best on the device. MiaAI-Lab; the approach is Track B of MiaAI-Lab's DeepSeek recipe
     ([DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold), patch 0021).
   - `0009-round-cost-model`, `0010-ngram-gather-all-lanes-at-once`, `0011-host-draws-in-parallel-and-faster-candidate-kernel`: MiaAI-Lab.
-  - `0012-delta-rollback-folded-into-the-next-verify-pass`: MiaAI-Lab.
+  - `0012-delta-rollback-folded-into-the-next-verify-pass`: upstream since TensorFold v1.2.2 (`TF_FLASHNEXT_KEEP_LATE`), no longer in `patches/`.
   - `0013-ngram-pread-reader-read-ahead-and-chunk-tail-rule`: MiaAI-Lab, carrying forward the `pread` n-gram reader with read-ahead of this recipe's
     earlier db281878 series (below), which is a port of the Python engine's NVFP4 n-gram table reader by the TensorFold Contributors to the Zig engine.
   - `0014-prompt-hc-fusion-and-expert-tile-rows`, `0015-prompt-mx128-two-stage-tile`: fused prompt hyper-connection kernels, expert row tiles, head pieces and
     a two-stage MX128 tile. MiaAI-Lab.
   - `0016-decode-shared-expert-side-stream-and-lane-batched-deltanet`: MiaAI-Lab; running the shared expert on a second stream comes from the earlier
     db281878 series.
-  - `0017-draft-chain-running-product-stop-rule`: MiaAI-Lab; the stop rule is the one of the earlier db281878 series, re-implemented on v1.1.4.
+  - `0017-draft-chain-running-product-stop-rule`: MiaAI-Lab; the stop rule is the one of the earlier db281878 series, re-implemented on v1.1.4 and v1.2.2.
+  - `0021-mtp-head-bf16-cache-under-fp8-kv`: the MTP head's own cache in bf16 under `--kv-cache fp8`, the part of v1.1.4's `0005` that
+    v1.2.2's one-format caches had dropped. MiaAI-Lab.
 - **Earlier series on TensorFold db281878** (patches 0011 to 0015, 0021 and 0029 to 0031, on `main`, retired on this branch):
   - NVIDIA FP4 support in the Zig engine (`0011` to `0015`): by MiaAI-Lab, as a port of TensorFold's Python implementation of the same formats (CSF scale
     decoding, MXFP8 linears, the NVFP4 n-gram table and its read-ahead), written by the TensorFold Contributors, to the Zig engine and its CUDA kernels.
     The engine's own new files say "Written for TensorFold by TensorFold Contributors".
   - Free after drain and admission reclaim (`0029`), image prompts in the prompt cache (`0030`): by [tempeste](https://github.com/tempeste), on
-    TensorFold's prompt cache, lane host and vision input by Ash Hart and the TensorFold contributors. Both are built into TensorFold v1.1.4.
+    TensorFold's prompt cache, lane host and vision input by Ash Hart and the TensorFold contributors. Both are built into TensorFold since v1.1.4.
   - Sliced fills one at a time (`0021`): by [BadAd84](https://github.com/BadAd84) (PR #53), rebased onto the FP4 engine by MiaAI-Lab.
-  - `TENSORFOLD_RANDOM_SEED` (`0031`): MiaAI-Lab; v1.1.4 has its own random-seed handling.
+  - `TENSORFOLD_RANDOM_SEED` (`0031`): MiaAI-Lab; TensorFold has its own random-seed handling since v1.1.4.
 - **The Zig CUDA serving path and the CUDA family registry** were authored by Jürgen Schmied
   ([jschmied](https://github.com/jschmied)) in [TensorFold PR #443](https://github.com/ashhart/TensorFold/pull/443)
   (commit [`59e77e8`](https://github.com/ashhart/TensorFold/commit/59e77e8f4b875ce0e863a8c896fc8e424bc539ac)):
