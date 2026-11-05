@@ -1,13 +1,12 @@
 diff --git a/zig/kernels/cuda/flashnext_mtp.cu b/zig/kernels/cuda/flashnext_mtp.cu
-index 2f5dc92..1e76c82 100644
+index 81febacd7..6fbebecde 100644
 --- a/zig/kernels/cuda/flashnext_mtp.cu
 +++ b/zig/kernels/cuda/flashnext_mtp.cu
-@@ -21,6 +21,35 @@ static __device__ __forceinline__ unsigned cand_key(unsigned short b) {
+@@ -20,6 +20,33 @@ static __device__ __forceinline__ unsigned cand_key(unsigned short b) {
      return (u & 0x8000u) ? (~u & 0xffffu) : (u | 0x8000u);
  }
  
-+// The eight columns [col0, col0 + 8) of a row, those below `end` only (their count is returned): one 16-byte load when the row is
-+// 16-byte aligned and all eight are there.
++// Columns [col0, col0 + 8) of a row below `end` into e, their count returned; one 16-byte load if aligned and all 8.
 +static __device__ __forceinline__ int cand_load8(const unsigned short* row, int end, int col0, bool aligned, unsigned short* e) {
 +    int n = end - col0;
 +    n = n < 0 ? 0 : (n > 8 ? 8 : n);
@@ -28,8 +27,7 @@ index 2f5dc92..1e76c82 100644
 +    return n;
 +}
 +
-+// h[bin] += 1 for every lane of the warp with `valid` (all 32 lanes call): lanes of one bin add together, the first of them its
-+// count, since the scores of a row fall in a few bins and a lane a bin would queue on the same word.
++// h[bin] += 1 for each `valid` lane (all 32 call): a bin's lanes add their count in one atomic, the first of them.
 +static __device__ __forceinline__ void cand_count(unsigned* h, unsigned bin, bool valid, int lane) {
 +    const unsigned peers = __match_any_sync(0xffffffffu, valid ? bin : 0x100u);
 +    if (valid && (peers & ((1u << lane) - 1u)) == 0u) atomicAdd(&h[bin], static_cast<unsigned>(__popc(peers)));
@@ -38,34 +36,20 @@ index 2f5dc92..1e76c82 100644
  }  // namespace fn_mtp
  
  // Program (row), 1024 threads: out [rows, 4] fp32 holds the best of a row's first V values, its log-sum-exp, its id, 0.
-@@ -84,8 +113,10 @@ extern "C" __global__ void __launch_bounds__(1024) fn_row_best(const __nv_bfloat
- // score first, of equal scores the lower column; +0 and -0 equal) go to vals[row * stride + j] (the score as fp32, exact) and
- // cols[row * stride + j] (its column), in no particular order, and flags[row] = 0. A row with a NaN has no total order: it
- // writes flags[row] = 1 and nothing else, and the host reads that row whole. The count-th largest key is found by two 8-bit
--// histogram passes over the 16-bit keys; the keys above it are taken whole, and of the keys equal to it the lowest columns, by
--// walking the row in tiles of 1,024 columns with a block-wide count of the ties in each.
-+// histogram passes over the 16-bit keys; the keys above it are taken whole, and of the keys equal to it the lowest columns.
-+// Every pass is a warp a run of columns (a lane eight columns of a 256-column step, loads four steps ahead, no barrier in a
-+// pass): the histograms are a warp's, counted a bin at a time (cand_count); the ties are ranked by column in the run (ballot-free
-+// scan over the lanes), after a barrier that gives each warp the ties of the runs before it.
- extern "C" __global__ void __launch_bounds__(1024) fn_row_cand(const __nv_bfloat16* __restrict__ L, int V, long long ld, int count,
-                                                                int stride, float* __restrict__ vals, int* __restrict__ cols,
-                                                                int* __restrict__ flags) {
-@@ -96,16 +127,154 @@ extern "C" __global__ void __launch_bounds__(1024) fn_row_cand(const __nv_bfloat
+@@ -90,19 +117,155 @@ extern "C" __global__ void __launch_bounds__(1024) fn_row_cand(const __nv_bfloat
      __shared__ unsigned whist[32][256];
      __shared__ unsigned hist[256];
      __shared__ unsigned wtie[32];
 -    __shared__ unsigned s_left, s_hi, s_cut, s_above, s_taken;
 +    __shared__ unsigned s_left, s_hi, s_cut, s_above;
++    // every pass: a warp a run of columns, a lane 8 columns of each 256-column step, loads four steps ahead, no barrier
 +    const bool aligned = (reinterpret_cast<unsigned long long>(row) & 15ull) == 0ull;
 +    const int nw = static_cast<int>(blockDim.x >> 5);
 +    const int span = ((V + nw - 1) / nw + 255) & ~255;
 +    const int lo = warp * span;
 +    const int end = lo + span < V ? lo + span : V;
 +    const int chunks = end > lo ? (end - lo + 255) >> 8 : 0;  // 256-column steps of this warp's run (the same for its lanes)
-+    // The fast path: a strided sample of the row gives a threshold key T with a few times `count` keys at or above it; one pass
-+    // collects the keys >= T (columns and scores, at most 1,024 of them) and ranks them; the first `count` in the draw's order are
-+    // the row's. A row with fewer than `count` or more than 1,024 keys >= T takes the exact two-histogram path below.
++    // fast path: a sampled cut T, the keys >= T (up to 1,024) ranked; else the exact two-histogram passes below
 +    __shared__ unsigned short lraw[1024];
 +    __shared__ int lcol[1024];
 +    __shared__ unsigned s_n;
@@ -211,8 +195,11 @@ index 2f5dc92..1e76c82 100644
 +        }
      }
      if (__syncthreads_or(nan)) {
+-        // a NaN row has no total order: flags[r] = 1, nothing written, and the host reads the row whole
          if (t == 0) flags[r] = 1;
-@@ -133,9 +302,19 @@ extern "C" __global__ void __launch_bounds__(1024) fn_row_cand(const __nv_bfloat
+         return;
+     }
+@@ -128,9 +291,19 @@ extern "C" __global__ void __launch_bounds__(1024) fn_row_cand(const __nv_bfloat
      for (int b = t; b < 32 * 256; b += blockDim.x) (&whist[0][0])[b] = 0u;
      __syncthreads();
      const unsigned hi = s_hi;
@@ -235,16 +222,18 @@ index 2f5dc92..1e76c82 100644
      }
      __syncthreads();
      if (t < 256) {
-@@ -155,7 +334,6 @@ extern "C" __global__ void __launch_bounds__(1024) fn_row_cand(const __nv_bfloat
+@@ -150,46 +323,74 @@ extern "C" __global__ void __launch_bounds__(1024) fn_row_cand(const __nv_bfloat
          s_left = left - above;  // the keys equal to the cut that are taken
          s_cut = (hi << 8) | static_cast<unsigned>(b);
          s_above = 0u;
 -        s_taken = 0u;
      }
      __syncthreads();
+-    // the keys above the cut whole, then of those equal to it the lowest columns, a block-wide tie count a tile
      const unsigned cut = s_cut;
-@@ -163,36 +341,67 @@ extern "C" __global__ void __launch_bounds__(1024) fn_row_cand(const __nv_bfloat
+     const unsigned ties = s_left;
      const unsigned taken_above = static_cast<unsigned>(k) - ties;
+-    // row r's slots `stride` apart: vals the scores as fp32 (exact), cols their columns, then flags[r] = 0
      float* out_v = vals + static_cast<long long>(r) * stride;
      int* out_c = cols + static_cast<long long>(r) * stride;
 -    for (int base = 0; base < V; base += blockDim.x) {
@@ -299,7 +288,7 @@ index 2f5dc92..1e76c82 100644
 +    __syncthreads();
 +    unsigned run = 0u;
 +    for (int w = 0; w < warp; ++w) run += wtie[w];
-+    // sweep 2: the run's ties by column, ranked after the `run` ties of the runs before; those ranked below `ties` are written
++    // sweep 2: the run's ties by column, ranked after the `run` ties before it; those ranked below `ties` written
 +    if (my_ties != 0u) {
 +        for (int c0 = 0; c0 < chunks && run < ties; c0 += 4) {
 +            unsigned short e[4][8];
@@ -339,18 +328,16 @@ index 2f5dc92..1e76c82 100644
  }
 diff --git a/zig/src/families/flashnext/cuda_host_draw.zig b/zig/src/families/flashnext/cuda_host_draw.zig
 new file mode 100644
-index 0000000..8dedc72
+index 000000000..e91e428de
 --- /dev/null
 +++ b/zig/src/families/flashnext/cuda_host_draw.zig
-@@ -0,0 +1,149 @@
-+//! Keyed draws on the host, several rows at once: the rows of a verify window (or of a round's windows) and the draft head's rows of
-+//! a batched step are independent, each drawn by `mtp.drawRowWith` from its own scores, so a few parked workers draw them side by
-+//! side and the draws are the ones a single thread would make, in any order.
-+//!
-+//! TF_FLASHNEXT_HOST_DRAW_THREADS=N (0, the default: one thread, the plain scans and one download a row): N workers beside the
-+//! engine thread, and each row's top_k found sixteen columns a compare (the same columns, in the same order).
+@@ -0,0 +1,210 @@
++//! Keyed draws on the host, several rows at once (TF_FLASHNEXT_HOST_DRAW_THREADS): each row's draw is its own.
 +const std = @import("std");
++const cuda = @import("cuda");
++const wt = @import("cuda_prompt_wt.zig");
 +const mtp = @import("cuda_mtp.zig");
++const cand = @import("cuda_mtp_cand.zig");
 +const ple_pool = @import("cuda_ple_pool.zig");
 +
 +const unread = std.math.maxInt(u32);
@@ -359,35 +346,29 @@ index 0000000..8dedc72
 +/// Workers beside the engine thread at most.
 +pub const max_threads: usize = 31;
 +
-+fn parse(text: []const u8) u32 {
-+    const n = std.fmt.parseInt(u32, std.mem.trim(u8, text, " \t\r\n"), 10) catch return 0;
-+    return @min(n, max_threads);
-+}
-+
-+/// The worker count the environment asks for (read once); 0 draws on the engine thread alone.
++/// TF_FLASHNEXT_HOST_DRAW_THREADS (read once): workers beside the engine thread; 0, the default, draws on it alone.
 +pub fn threads() usize {
 +    var v = configured.load(.monotonic);
 +    if (v == unread) {
-+        v = if (std.c.getenv("TF_FLASHNEXT_HOST_DRAW_THREADS")) |e| parse(std.mem.span(e)) else 0;
++        const text = if (std.c.getenv("TF_FLASHNEXT_HOST_DRAW_THREADS")) |e| std.mem.span(e) else "0";
++        v = @intCast(@min(std.fmt.parseInt(u32, std.mem.trim(u8, text, " \t\r\n"), 10) catch 0, max_threads));
 +        configured.store(v, .monotonic);
 +    }
 +    return v;
 +}
 +
-+/// Whether a draw of `sm` over a row of `n` scores keeps its working arrays within a worker's scratch (the wider ones draw on the
-+/// engine thread with the heap).
++const max_k: usize = 256;
++/// Bytes of a worker's draw arrays at k = max_k (drawRow's and choose's), with room to spare.
++const scratch_bytes: usize = 32 * 1024;
++
++/// Whether a draw of `sm` over `n` scores fits a worker's scratch (a wider top_k draws on the engine thread).
 +pub fn fits(sm: ?mtp.Sampling, n: usize) bool {
 +    const s = sm orelse return true;
 +    if (s.temperature <= 0) return true;
-+    const k = if (s.top_k == 0 or s.top_k >= n) n else @as(usize, s.top_k);
-+    return k <= max_k;
++    return (if (s.top_k == 0 or s.top_k >= n) n else @as(usize, s.top_k)) <= max_k;
 +}
 +
-+const max_k: usize = 256;
-+/// Bytes of drawRowWith's arrays at k = max_k (vals, keys, top_v, top_c, then choose's order, scaled and probs) with room to spare.
-+const scratch_bytes: usize = 32 * 1024;
-+
-+/// One row's draw: the row (masked by `mask` first, if any), the draw's key and, for a draft pick, the token's probability.
++/// One row's draw: the row (masked by `mask` first), its key and, for a draft pick, the token's probability.
 +pub const Job = struct {
 +    row: []u16,
 +    ids: ?[]const u32 = null,
@@ -406,18 +387,16 @@ index 0000000..8dedc72
 +        const a = fba.allocator();
 +        if (j.mask.len > 0) mtp.maskRow(j.row, j.mask);
 +        if (j.pick) {
-+            const p = mtp.drawPickWith(a, j.row, j.ids.?, j.lse, j.position, j.sm, true) catch |e| {
++            const p = mtp.drawPick(a, j.row, j.ids.?, j.lse, j.position, j.sm) catch |e| {
 +                j.err = e;
 +                return;
 +            };
 +            j.token = p.token;
 +            j.prob = p.prob;
-+        } else {
-+            j.token = mtp.drawRowWith(a, j.row, j.ids, j.position, j.sm, true) catch |e| {
-+                j.err = e;
-+                return;
-+            };
-+        }
++        } else j.token = mtp.drawRow(a, j.row, j.ids, j.position, j.sm) catch |e| {
++            j.err = e;
++            return;
++        };
 +    }
 +};
 +
@@ -426,30 +405,88 @@ index 0000000..8dedc72
 +    parts: usize,
 +
 +    fn part(ctx: *const anyopaque, p: usize) anyerror!void {
-+        const b: *Batch = @ptrCast(@alignCast(@constCast(ctx)));
++        const b: *const Batch = @ptrCast(@alignCast(ctx));
 +        var i = p;
 +        while (i < b.jobs.len) : (i += b.parts) b.jobs[i].run();
 +    }
 +};
 +
-+var pool: std.atomic.Value(?*ple_pool.Pool) = .init(null);
-+
-+/// Draws every job, the engine thread and up to threads() workers sharing them; returns when all are done. The first failed job's
-+/// error is returned.
-+pub fn run(io: std.Io, jobs: []Job) !void {
-+    if (jobs.len == 0) return;
-+    const n = threads();
-+    var b: Batch = .{ .jobs = jobs, .parts = @max(1, @min(jobs.len, n + 1)) };
-+    if (b.parts == 1) {
-+        try Batch.part(&b, 0);
-+    } else {
-+        const p = pool.load(.acquire) orelse blk: {
-+            const made = try ple_pool.Pool.create(std.heap.page_allocator, io);
-+            break :blk if (pool.cmpxchgStrong(null, made, .acq_rel, .acquire)) |other| other.? else made;
-+        };
-+        try p.run(b.parts, .{ .ctx = &b, .run = Batch.part });
-+    }
++/// Every job drawn by the engine thread and up to threads() of `pool`'s workers; the first failed job's error.
++pub fn run(pool: ?*ple_pool.Pool, jobs: []Job) !void {
++    const b: Batch = .{ .jobs = jobs, .parts = @max(1, @min(jobs.len, threads() + 1)) };
++    if (b.parts == 1 or pool == null) try Batch.part(&b, 0) else try pool.?.run(b.parts, .{ .ctx = &b, .run = Batch.part });
 +    for (jobs) |j| if (j.err) |e| return e;
++}
++
++fn download(stream: cuda.Stream, dst: []u8, src: u64) !void {
++    const d = stream.d;
++    try stream.synchronize();
++    try d.check(d.api.cuMemcpyDtoH_v2(dst.ptr, src, dst.len), "cuMemcpyDtoH");
++}
++
++/// Windows one call draws at most (a shared pass's).
++pub const max_windows: usize = 32;
++
++/// Ops.draws over a shared pass's windows (ds[i] by sms[i] in masks[i], into outs[i]), all device work queued first.
++pub fn windows(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, pool: ?*ple_pool.Pool, ds: []const *mtp.Draft, sms: []const ?mtp.Sampling, masks: []const []const u32, outs: []const []u32) !void {
++    const vocab = wt.vocab;
++    if (ds.len > max_windows) return error.UnexpectedTensor;
++    // greedy windows' bests, then with TF_FLASHNEXT_SAMPLE_CAND=1 the sampled ones' candidates in slots side by side
++    var slot_at: [max_windows]usize = undefined;
++    var slot_k: [max_windows]usize = @splat(0);
++    var slots: usize = 0;
++    for (ds, sms, masks, 0..) |d, sm, mk, i| {
++        if (!mtp.isSampled(sm) and mk.len == 0) {
++            try h.best(st, d.logits.ptr, vocab, vocab, d.rows, d.best.ptr);
++        } else if (cand.candidatesOn() and mk.len == 0) if (cand.candidateCount(sm, vocab)) |count| if (slots + d.rows <= cand.cand_slots) {
++            try cand.launch(h, st, d.logits.ptr, vocab, vocab, d.rows, count, slots);
++            slot_at[i] = slots;
++            slot_k[i] = count;
++            slots += d.rows;
++        };
++    }
++    var c: cand.Cands = undefined;
++    if (slots > 0) try c.read(h, st);
++    // the rest read whole, drawn on the host's threads (rows past a worker's scratch or the jobs' room: here)
++    var jobs: [mtp.round_rows]Job = undefined;
++    var n_jobs: usize = 0;
++    var jobbed: [max_windows]bool = @splat(false);
++    for (ds, sms, masks, outs, 0..) |d, sm, mk, out, i| {
++        const n = d.rows;
++        if (!mtp.isSampled(sm) and mk.len == 0) {
++            try download(st, std.mem.sliceAsBytes(d.best_host[0 .. 4 * n]), d.best.ptr);
++            for (out[0..n], 0..) |*t, r| t.* = @intCast(@as(i32, @bitCast(d.best_host[4 * r + 2])));
++            continue;
++        }
++        if (slot_k[i] > 0 and std.mem.allEqual(i32, c.flags[slot_at[i]..][0..n], 0)) {
++            for (out[0..n], 0..) |*t, r| {
++                const at = (slot_at[i] + r) * cand.cand_max;
++                t.* = try cand.drawCandidates(gpa, c.vals[at..][0..slot_k[i]], c.cols[at..][0..slot_k[i]], null, d.fed0 + 1 + r, sm);
++            }
++            continue;
++        }
++        const rows = d.host[0 .. n * vocab];
++        try download(st, std.mem.sliceAsBytes(rows), d.logits.ptr);
++        const words = mk.len / n;
++        jobbed[i] = threads() > 0 and fits(sm, vocab) and n_jobs + n <= jobs.len;
++        for (out[0..n], 0..) |*t, r| {
++            const row = rows[r * vocab ..][0..vocab];
++            const mask = if (words > 0) mk[r * words ..][0..words] else &[_]u32{};
++            if (jobbed[i]) {
++                jobs[n_jobs] = .{ .row = row, .mask = mask, .position = d.fed0 + 1 + r, .sm = sm };
++                n_jobs += 1;
++            } else {
++                if (words > 0) mtp.maskRow(row, mask);
++                t.* = try mtp.drawRow(gpa, row, null, d.fed0 + 1 + r, sm);
++            }
++        }
++    }
++    try run(pool, jobs[0..n_jobs]);
++    var at: usize = 0;
++    for (ds, outs, jobbed[0..ds.len]) |d, out, j| if (j) for (out[0..d.rows]) |*t| {
++        t.* = jobs[at].token;
++        at += 1;
++    };
 +}
 +
 +test "jobs draw the rows a single thread draws, across worker counts" {
@@ -467,74 +504,74 @@ index 0000000..8dedc72
 +    for (ids, 0..) |*id, i| id.* = @intCast(3 + 7 * i);
 +    var bits: [n / 32 + 1]u32 = undefined;
 +    for (&bits) |*w| w.* = prng.random().int(u32) | prng.random().int(u32);
-+    for ([_]usize{ 0, 1, 3, 7 }) |t| {
-+        configured.store(@intCast(t), .monotonic);
++    const pool = try ple_pool.Pool.create(gpa, std.testing.io);
++    defer pool.destroy();
++    defer configured.store(unread, .monotonic);
++    for ([_]u32{ 0, 1, 3, 7 }) |t| {
++        configured.store(t, .monotonic);
 +        for ([_]mtp.Sampling{ .{ .seed = 5 }, .{ .seed = 9, .top_k = 64, .top_p = 0.9, .min_p = 0.02 }, .{ .seed = 2, .temperature = 0 } }) |sm| {
 +            var jobs: [24]Job = undefined;
 +            for (&jobs, 0..) |*j, r| j.* = .{ .row = rows[r * n ..][0..n], .ids = if (r % 2 == 0) ids else null, .mask = if (r % 3 == 0) &bits else &.{}, .lse = 1.5, .position = 100 + r, .sm = sm, .pick = r % 2 == 0 };
-+            try run(std.testing.io, &jobs);
++            try run(pool, &jobs);
 +            for (jobs, 0..) |j, r| {
-+                const row = copy[r * n ..][0..n];
 +                var plain: [n]u16 = undefined;
-+                @memcpy(&plain, row);
++                @memcpy(&plain, copy[r * n ..][0..n]);
 +                if (r % 3 == 0) mtp.maskRow(&plain, &bits);
 +                if (r % 2 == 0) {
 +                    const want = try mtp.drawPick(gpa, &plain, ids, 1.5, 100 + r, sm);
 +                    try std.testing.expectEqual(want.token, j.token);
 +                    try std.testing.expectEqual(want.prob, j.prob);
-+                } else {
-+                    try std.testing.expectEqual(try mtp.drawRow(gpa, &plain, null, 100 + r, sm), j.token);
-+                }
++                } else try std.testing.expectEqual(try mtp.drawRow(gpa, &plain, null, 100 + r, sm), j.token);
 +            }
-+            // the rows were masked in place for the next case: restore them
++            // the rows were masked in place: restore them for the next case
 +            @memcpy(rows, copy);
 +        }
 +    }
-+    configured.store(unread, .monotonic);
++}
++
++test "TF_FLASHNEXT_HOST_DRAW_THREADS: unset or bad is 0, at most 31" {
++    const env = @import("sys").env;
++    defer _ = env.unsetenv("TF_FLASHNEXT_HOST_DRAW_THREADS");
++    defer configured.store(unread, .monotonic);
++    for ([_]struct { ?[*:0]const u8, usize }{ .{ null, 0 }, .{ "7", 7 }, .{ " 3\n", 3 }, .{ "x", 0 }, .{ "-1", 0 }, .{ "99", 31 } }) |c| {
++        if (c[0]) |v| _ = env.setenv("TF_FLASHNEXT_HOST_DRAW_THREADS", v, 1) else _ = env.unsetenv("TF_FLASHNEXT_HOST_DRAW_THREADS");
++        configured.store(unread, .monotonic);
++        try std.testing.expectEqual(c[1], threads());
++    }
++    try std.testing.expect(fits(null, 10) and fits(.{ .seed = 1, .temperature = 0 }, 300_000));
++    try std.testing.expect(fits(.{ .seed = 1, .top_k = 256 }, 300_000) and !fits(.{ .seed = 1, .top_k = 257 }, 300_000));
++    try std.testing.expect(!fits(.{ .seed = 1, .top_k = 0 }, 300_000) and fits(.{ .seed = 1, .top_k = 0 }, 200));
 +}
 diff --git a/zig/src/families/flashnext/cuda_lanes_verify.zig b/zig/src/families/flashnext/cuda_lanes_verify.zig
-index d921a2a..2ed23f7 100644
+index d921a2a5a..5b253ad13 100644
 --- a/zig/src/families/flashnext/cuda_lanes_verify.zig
 +++ b/zig/src/families/flashnext/cuda_lanes_verify.zig
-@@ -2,6 +2,7 @@
- const lanes = @import("lanes");
- const prompt = @import("cuda_prompt.zig");
- const mtp = @import("cuda_mtp.zig");
-+const hd = @import("cuda_host_draw.zig");
- const be = lanes.backend;
- 
- /// Windows a shared pass takes at most (a round's streams).
-@@ -28,7 +29,17 @@ pub fn windows(self: anytype, wins: []const be.Window, out: []be.Verified, draft
+@@ -28,7 +28,15 @@ pub fn windows(self: anytype, wins: []const be.Window, out: []be.Verified, draft
          if (n == 1 or self.ranks != null or cap <= 1) {
              for (seqs[0..n], ds[0..n], idss[0..n]) |q, d, ids| try self.ops().verify(q, d, ids);
          } else try self.ops().verifyMany(seqs[0..n], ds[0..n], idss[0..n], self.logits.ptr);
 -        for (drafted[at..][0..n], ds[0..n]) |wi, d| try self.ops().draws(d, wins[wi].stream.sampling, wins[wi].masks, out[wi].sampled[0..wins[wi].rows()]);
-+        if ((hd.threads() > 0 or mtp.candidatesOn()) and n > 0) {
-+            var sms: [round_streams]?mtp.Sampling = undefined;
-+            var masks: [round_streams][]const u32 = undefined;
-+            var outs: [round_streams][]u32 = undefined;
-+            for (drafted[at..][0..n], 0..) |wi, i| {
-+                sms[i] = wins[wi].stream.sampling;
-+                masks[i] = wins[wi].masks;
-+                outs[i] = out[wi].sampled[0..wins[wi].rows()];
-+            }
-+            try self.ops().drawsMany(ds[0..n], sms[0..n], masks[0..n], outs[0..n]);
-+        } else for (drafted[at..][0..n], ds[0..n]) |wi, d| try self.ops().draws(d, wins[wi].stream.sampling, wins[wi].masks, out[wi].sampled[0..wins[wi].rows()]);
++        var sms: [round_streams]?mtp.Sampling = undefined;
++        var masks: [round_streams][]const u32 = undefined;
++        var outs: [round_streams][]u32 = undefined;
++        for (drafted[at..][0..n], 0..) |wi, i| {
++            sms[i] = wins[wi].stream.sampling;
++            masks[i] = wins[wi].masks;
++            outs[i] = out[wi].sampled[0..wins[wi].rows()];
++        }
++        try self.ops().draws(ds[0..n], sms[0..n], masks[0..n], outs[0..n]);
          at += n;
      }
  }
 diff --git a/zig/src/families/flashnext/cuda_mtp.zig b/zig/src/families/flashnext/cuda_mtp.zig
-index 4bf817b..f7d3613 100644
+index 0deb532be..59adb34c5 100644
 --- a/zig/src/families/flashnext/cuda_mtp.zig
 +++ b/zig/src/families/flashnext/cuda_mtp.zig
-@@ -85,6 +85,49 @@ pub fn maskRow(row: []u16, bits: []const u32) void {
+@@ -85,6 +85,57 @@ pub fn maskRow(row: []u16, bits: []const u32) void {
+     }
+ }
  
- /// The keyed draw over one bf16 score row, column j being token ids[j] (or j), as lanes.sampling.choose draws.
- pub fn drawRow(gpa: std.mem.Allocator, row: []const u16, ids: ?[]const u32, position: u64, sm: ?Sampling) !u32 {
-+    return drawRowWith(gpa, row, ids, position, sm, false);
-+}
-+
-+/// Inserts column `col` (score `v`) into the `held` best so far, best first, an equal score ranking below the earlier column.
++/// Column `col` (score `v`) into the `held` best so far, best first; an equal score ranks below the earlier column.
 +fn insertTop(top_v: []f32, top_c: []usize, held: *usize, v: f32, col: usize) void {
 +    const k = top_v.len;
 +    if (held.* == k and !(v > top_v[k - 1])) return;
@@ -548,15 +585,8 @@ index 4bf817b..f7d3613 100644
 +    top_c[at] = col;
 +}
 +
-+/// The k best columns of `row`, best first (`top_v`, `top_c` of length k), by one pass over the row.
++/// The k best columns of `row`, best first; 16 columns at once tested against the k-th (insertTop skips the rest).
 +fn scanTop(row: []const u16, top_v: []f32, top_c: []usize) void {
-+    var held: usize = 0;
-+    for (row, 0..) |b, col| insertTop(top_v, top_c, &held, promote(b), col);
-+}
-+
-+/// scanTop with sixteen columns tested at once against the k-th best so far: a column that does not beat it is skipped by
-+/// insertTop too (a NaN beats nothing in either), so the held columns, their order and their scores are scanTop's bit for bit.
-+fn scanTopWide(row: []const u16, top_v: []f32, top_c: []usize) void {
 +    const lanes_n = 16;
 +    const k = top_v.len;
 +    var held: usize = 0;
@@ -565,19 +595,37 @@ index 4bf817b..f7d3613 100644
 +    while (col + lanes_n <= row.len) : (col += lanes_n) {
 +        const w: @Vector(lanes_n, u16) = row[col..][0..lanes_n].*;
 +        const f: @Vector(lanes_n, f32) = @bitCast(@as(@Vector(lanes_n, u32), w) << @splat(16));
-+        const thr: @Vector(lanes_n, f32) = @splat(top_v[k - 1]);
-+        if (!@reduce(.Or, f > thr)) continue;
++        if (!@reduce(.Or, f > @as(@Vector(lanes_n, f32), @splat(top_v[k - 1])))) continue;
 +        for (row[col..][0..lanes_n], col..) |b, c| insertTop(top_v, top_c, &held, promote(b), c);
 +    }
 +    while (col < row.len) : (col += 1) insertTop(top_v, top_c, &held, promote(row[col]), col);
 +}
 +
-+/// drawRow, the k best columns found by scanTopWide when `wide` (the same draw, found faster).
-+pub fn drawRowWith(gpa: std.mem.Allocator, row: []const u16, ids: ?[]const u32, position: u64, sm: ?Sampling, wide_scan: bool) !u32 {
++test "the k best columns: those, that order and those scores of a column-at-a-time scan, ties and NaNs too" {
++    var prng = std.Random.DefaultPrng.init(404);
++    var row: [1100]u16 = undefined;
++    for ([_]u8{ 1, 2, 5, 40, 200 }) |levels| for ([_]usize{ 1, 2, 3, 20, 31, 64, 300 }) |k| for ([_]usize{ 1, 15, 16, 17, 64, 333, 1100 }) |n| {
++        cand.tiedRow(&prng, row[0..n], levels);
++        for ([_]bool{ false, true }) |with_nan| {
++            if (with_nan and n > 40) row[n / 2] = 0x7fc0 + prng.random().uintLessThan(u16, 8);
++            const kk = @min(k, n);
++            var a_v: [300]f32 = @splat(0);
++            var a_c: [300]usize = undefined;
++            var b_v: [300]f32 = @splat(0);
++            var b_c: [300]usize = undefined;
++            var held: usize = 0;
++            for (row[0..n], 0..) |b, col| insertTop(a_v[0..kk], a_c[0..kk], &held, promote(b), col);
++            scanTop(row[0..n], b_v[0..kk], b_c[0..kk]);
++            try std.testing.expectEqualSlices(usize, a_c[0..kk], b_c[0..kk]);
++            try std.testing.expectEqualSlices(u32, @ptrCast(a_v[0..kk]), @ptrCast(b_v[0..kk]));
++        }
++    };
++}
++
+ /// The keyed draw over one bf16 score row, column j being token ids[j] (or j), as lanes.sampling.choose draws.
+ pub fn drawRow(gpa: std.mem.Allocator, row: []const u16, ids: ?[]const u32, position: u64, sm: ?Sampling) !u32 {
      const id = struct {
-         fn of(map: ?[]const u32, col: usize) u64 {
-             return if (map) |m| m[col] else col;
-@@ -109,19 +152,7 @@ pub fn drawRow(gpa: std.mem.Allocator, row: []const u16, ids: ?[]const u32, posi
+@@ -111,19 +162,7 @@ pub fn drawRow(gpa: std.mem.Allocator, row: []const u16, ids: ?[]const u32, posi
          defer gpa.free(top_v);
          const top_c = try gpa.alloc(usize, k);
          defer gpa.free(top_c);
@@ -594,261 +642,222 @@ index 4bf817b..f7d3613 100644
 -            top_v[at] = v;
 -            top_c[at] = col;
 -        }
-+        if (wide_scan) scanTopWide(row, top_v, top_c) else scanTop(row, top_v, top_c);
++        scanTop(row, top_v, top_c);
          for (vals, keys, top_v, top_c) |*v, *key, tv, c| {
              v.* = tv;
              key.* = id(ids, c);
-@@ -135,7 +166,12 @@ pub fn drawRow(gpa: std.mem.Allocator, row: []const u16, ids: ?[]const u32, posi
- /// column. The lone head step (Ops.pick) and the batched one (Ops.draftMany) both draw through here, so a stream's drafts
- /// do not depend on whether it drafted alone.
- pub fn drawPick(gpa: std.mem.Allocator, row: []const u16, ids: []const u32, lse: f32, position: u64, sm: ?Sampling) !Pick {
--    const tok = try drawRow(gpa, row, ids, position, sm);
-+    return drawPickWith(gpa, row, ids, lse, position, sm, false);
-+}
-+
-+/// drawPick over drawRowWith.
-+pub fn drawPickWith(gpa: std.mem.Allocator, row: []const u16, ids: []const u32, lse: f32, position: u64, sm: ?Sampling, wide_scan: bool) !Pick {
-+    const tok = try drawRowWith(gpa, row, ids, position, sm, wide_scan);
-     const col = std.sort.binarySearch(u32, ids, tok, struct {
-         fn order(t: u32, x: u32) std.math.Order {
-             return std.math.order(t, x);
-@@ -170,8 +206,9 @@ pub fn candidateCount(sm: ?Sampling, n: usize) ?usize {
-     return s.top_k;
- }
+@@ -284,6 +323,7 @@ pub const Chain = @import("cuda_mtp_draft.zig").Chain;
+ pub const Draft = @import("cuda_mtp_draft.zig").Draft;
+ pub const Ops = @import("cuda_mtp_ops.zig").Ops;
+ pub const cand = @import("cuda_mtp_cand.zig");
++pub const host_draw = @import("cuda_host_draw.zig");
+ pub const check = @import("cuda_mtp_check.zig").check;
  
+ test "the head's bytes: NVFP4 experts as before, FP8 routed experts a byte a weight and their f32 block scales" {
+diff --git a/zig/src/families/flashnext/cuda_mtp_cand.zig b/zig/src/families/flashnext/cuda_mtp_cand.zig
+index a8defa1af..26834dcfb 100644
+--- a/zig/src/families/flashnext/cuda_mtp_cand.zig
++++ b/zig/src/families/flashnext/cuda_mtp_cand.zig
+@@ -4,6 +4,8 @@ const std = @import("std");
+ const cuda = @import("cuda");
+ const lanes = @import("lanes");
+ const mtp = @import("cuda_mtp.zig");
++const hd = @import("cuda_host_draw.zig");
++const ple_pool = @import("cuda_ple_pool.zig");
+ 
+ const Sampling = mtp.Sampling;
+ const Pick = mtp.Pick;
+@@ -13,8 +15,8 @@ const promote = mtp.promote;
+ 
+ /// Candidates a row's draw reads at most (a request's top_k; a larger one takes the whole row).
+ pub const cand_max: usize = 64;
 -/// Rows one launch of fn_row_cand serves at most (a window's rows, or the lanes of a batched head step).
 -pub const cand_slots: usize = 16;
-+/// Rows of scratch for fn_row_cand's outputs: a shared pass's windows side by side (up to 32 of 16 rows would not fit; a pass is
-+/// 64 rows at most), or the lanes of a batched head step.
++/// Rows of fn_row_cand's scratch: a shared pass's windows side by side (64 rows at most), or a head step's lanes.
 +pub const cand_slots: usize = 64;
- /// Device scratch for fn_row_cand's outputs: vals [cand_slots, cand_max] f32, cols [cand_slots, cand_max] i32, flags [cand_slots] i32.
+ /// Device scratch: vals [cand_slots, cand_max] f32, cols [cand_slots, cand_max] i32, flags [cand_slots] i32.
  pub const cand_bytes: usize = 2 * cand_slots * cand_max * 4 + cand_slots * 4;
  
-@@ -182,6 +219,11 @@ pub const Cands = struct {
+@@ -32,17 +34,18 @@ pub fn candidateCount(sm: ?Sampling, n: usize) ?usize {
+ }
+ 
+ /// The scratch on the host: slot s holds vals / cols [s * cand_max ..] and flags[s] (non-zero: read that row whole).
+-pub const Cands = struct {
++pub const Cands = extern struct {
+     vals: [cand_slots * cand_max]f32 = undefined,
+     cols: [cand_slots * cand_max]i32 = undefined,
      flags: [cand_slots]i32 = undefined,
+ 
+-    /// Slots [0, n) of the head's scratch, once the stream is done.
+-    pub fn read(c: *Cands, h: *const Head, stream: cuda.Stream, n: usize) !void {
+-        const base = (h.cand_buf orelse return error.NoCandidates).ptr;
+-        try download(stream, std.mem.sliceAsBytes(c.vals[0 .. n * cand_max]), base);
+-        try download(stream, std.mem.sliceAsBytes(c.cols[0 .. n * cand_max]), base + cand_slots * cand_max * 4);
+-        try download(stream, std.mem.sliceAsBytes(c.flags[0..n]), base + 2 * cand_slots * cand_max * 4);
++    /// The head's scratch, once the stream is done: one copy, the layouts being one.
++    pub fn read(c: *Cands, h: *const Head, stream: cuda.Stream) !void {
++        try download(stream, std.mem.asBytes(c), (h.cand_buf orelse return error.NoCandidates).ptr);
++    }
++
++    comptime {
++        std.debug.assert(@sizeOf(Cands) == cand_bytes);
+     }
  };
  
-+comptime {
-+    // the device scratch and its host copy are one layout: a single download fills a Cands
-+    std.debug.assert(@sizeOf(Cands) == cand_bytes);
-+}
+@@ -74,7 +77,7 @@ pub fn pickRow(h: *const Head, stream: cuda.Stream, gpa: std.mem.Allocator, d: *
+     if (candidatesOn()) if (candidateCount(sm, n)) |count| {
+         var c: Cands = undefined;
+         try launch(h, stream, d.dlogits.ptr, n, n, 1, count, 0);
+-        try c.read(h, stream, 1);
++        try c.read(h, stream);
+         if (c.flags[0] == 0) return drawPickCandidates(gpa, c.vals[0..count], c.cols[0..count], h.ids, lse, position, sm);
+     };
+     const row = d.host[0..n];
+@@ -86,6 +89,8 @@ pub fn pickRow(h: *const Head, stream: cuda.Stream, gpa: std.mem.Allocator, d: *
+ pub const Step = struct {
+     k: [cand_slots]usize = @splat(0),
+     c: Cands = .{},
++    /// Lane r's draw made on the host's threads (TF_FLASHNEXT_HOST_DRAW_THREADS, drawRows), else null.
++    picked: [cand_slots]?Pick = @splat(null),
+ 
+     /// fn_row_cand for each active lane (draft act[r]) whose rule takes candidates, then the read-back.
+     pub fn run(h: *const Head, stream: cuda.Stream, ds: []const *Draft, act: []const usize, sms: []const ?Sampling) !Step {
+@@ -97,12 +102,31 @@ pub const Step = struct {
+             any = true;
+             try launch(h, stream, ds[i].dlogits.ptr, h.ids.len, h.ids.len, 1, count, r);
+         };
+-        if (any) try s.c.read(h, stream, act.len);
++        if (any) try s.c.read(h, stream);
+         return s;
+     }
+ 
++    /// With host draw threads: the whole rows the lanes' `draw` would read, drawn side by side (lse: best[r * 4 + 1]).
++    pub fn drawRows(s: *Step, h: *const Head, stream: cuda.Stream, pool: ?*ple_pool.Pool, ds: []const *Draft, act: []const usize, sms: []const ?Sampling, best: []const f32, positions: []const u64, j: usize) !void {
++        if (hd.threads() == 0) return;
++        var jobs: [cand_slots]hd.Job = undefined;
++        var lane: [cand_slots]usize = undefined;
++        var n: usize = 0;
++        for (act, 0..) |i, r| {
++            if (!mtp.isSampled(sms[i]) or (s.k[r] > 0 and s.c.flags[r] == 0) or !hd.fits(sms[i], h.ids.len)) continue;
++            const row = ds[i].host[0..h.ids.len];
++            try download(stream, std.mem.sliceAsBytes(row), ds[i].dlogits.ptr);
++            jobs[n] = .{ .row = row, .ids = h.ids, .lse = best[r * 4 + 1], .position = positions[i] + j, .sm = sms[i], .pick = true };
++            lane[n] = r;
++            n += 1;
++        }
++        try hd.run(pool, jobs[0..n]);
++        for (jobs[0..n], lane[0..n]) |job, r| s.picked[r] = .{ .token = job.token, .prob = job.prob };
++    }
 +
+     /// Lane r's draw (draft `d`) as its lone pick makes it: from its candidates, else its whole row.
+     pub fn draw(s: *const Step, h: *const Head, stream: cuda.Stream, gpa: std.mem.Allocator, r: usize, d: *Draft, lse: f32, position: u64, sm: ?Sampling) !Pick {
++        if (s.picked[r]) |p| return p;
+         const k = s.k[r];
+         if (k > 0 and s.c.flags[r] == 0) {
+             const at = r * cand_max;
+@@ -114,21 +138,6 @@ pub const Step = struct {
+     }
+ };
+ 
+-/// Ops.draws' sampled rows (no masks) at positions first + r from their candidates; false: read the window whole.
+-pub fn window(h: *const Head, stream: cuda.Stream, gpa: std.mem.Allocator, scores: u64, v: usize, n: usize, first: u64, sm: ?Sampling, out: []u32) !bool {
+-    if (!candidatesOn() or n > cand_slots) return false;
+-    const count = candidateCount(sm, v) orelse return false;
+-    var c: Cands = undefined;
+-    try launch(h, stream, scores, v, v, n, count, 0);
+-    try c.read(h, stream, n);
+-    if (!std.mem.allEqual(i32, c.flags[0..n], 0)) return false;
+-    for (out[0..n], 0..) |*t, r| {
+-        const at = r * cand_max;
+-        t.* = try drawCandidates(gpa, c.vals[at..][0..count], c.cols[at..][0..count], null, first + r, sm);
+-    }
+-    return true;
+-}
+-
  /// A bf16 score's 16-bit sort key (fn_row_cand's): larger scores larger keys, +0 and -0 one key (NaN has none).
  pub fn candidateKey(bits: u16) u16 {
      const u: u32 = if (bits & 0x7fff == 0) 0 else bits;
-@@ -410,6 +452,10 @@ pub const Draft = @import("cuda_mtp_draft.zig").Draft;
- pub const Ops = @import("cuda_mtp_ops.zig").Ops;
- pub const check = @import("cuda_mtp_check.zig").check;
- 
-+test {
-+    _ = @import("cuda_host_draw.zig");
-+}
-+
- test "the draft vocabulary is 79,591 sorted ids under the vocabulary" {
-     const ids = try draftIds(std.testing.allocator);
-     defer std.testing.allocator.free(ids);
-@@ -558,6 +604,29 @@ test "a keyed draw over the candidates is the draw over the whole row, and a pic
-     try std.testing.expectEqual(@as(?usize, 20), candidateCount(.{ .seed = 1, .top_k = 20 }, 21));
+@@ -203,7 +212,7 @@ pub fn drawPickCandidates(gpa: std.mem.Allocator, vals: []const f32, cols: []con
  }
  
-+test "the wide scan holds the columns, order and scores of the plain scan, ties and NaNs included" {
-+    var prng = std.Random.DefaultPrng.init(404);
-+    var row: [1100]u16 = undefined;
-+    for ([_]u8{ 1, 2, 5, 40, 200 }) |levels| for ([_]usize{ 1, 2, 3, 20, 31, 64, 300 }) |k| for ([_]usize{ 1, 15, 16, 17, 64, 333, 1100 }) |n| {
-+        tiedRow(&prng, row[0..n], levels);
-+        for ([_]bool{ false, true }) |with_nan| {
-+            if (with_nan and n > 40) row[n / 2] = 0x7fc0 + prng.random().uintLessThan(u16, 8);
-+            var a_v: [300]f32 = undefined;
-+            var a_c: [300]usize = undefined;
-+            var b_v: [300]f32 = undefined;
-+            var b_c: [300]usize = undefined;
-+            const kk = @min(k, n);
-+            @memset(a_v[0..kk], 0);
-+            @memset(b_v[0..kk], 0);
-+            scanTop(row[0..n], a_v[0..kk], a_c[0..kk]);
-+            scanTopWide(row[0..n], b_v[0..kk], b_c[0..kk]);
-+            const held = @min(kk, n);
-+            try std.testing.expectEqualSlices(usize, a_c[0..held], b_c[0..held]);
-+            for (a_v[0..held], b_v[0..held]) |x, y| try std.testing.expectEqual(@as(u32, @bitCast(x)), @as(u32, @bitCast(y)));
-+        }
-+    };
-+}
-+
- test "a masked row draws only allowed tokens, greedy the best of them" {
-     const gpa = std.testing.allocator;
-     var prng = std.Random.DefaultPrng.init(5);
+ /// A bf16 row of `n` scores drawn from a few values so that ties at any cut are common, with both zeros and infinities.
+-fn tiedRow(prng: *std.Random.DefaultPrng, row: []u16, levels: u8) void {
++pub fn tiedRow(prng: *std.Random.DefaultPrng, row: []u16, levels: u8) void {
+     const specials = [_]u16{ 0x0000, 0x8000, 0x7f80, 0xff80, 0x3f80, 0xbf80 };
+     for (row) |*v| {
+         const r = prng.random().int(u16);
+diff --git a/zig/src/families/flashnext/cuda_mtp_check.zig b/zig/src/families/flashnext/cuda_mtp_check.zig
+index 53e3b2d05..0cef35617 100644
+--- a/zig/src/families/flashnext/cuda_mtp_check.zig
++++ b/zig/src/families/flashnext/cuda_mtp_check.zig
+@@ -48,7 +48,7 @@ pub fn decode(comptime Tri: type, o: Ops(Tri), seq: *prompt.Seq, d: *Draft, out:
+         const rows = 1 + ch.n;
+         const tv = std.Io.Clock.awake.now(o.e.io).toNanoseconds();
+         try o.verify(seq, d, ids[0..rows]);
+-        try o.draws(d, sm, &.{}, sampled[0..rows]);
++        try o.draws(&.{d}, &.{sm}, &.{&.{}}, &.{sampled[0..rows]});
+         const td = std.Io.Clock.awake.now(o.e.io).toNanoseconds();
+         st.verify_ms += @as(f64, @floatFromInt(td - tv)) / 1e6;
+         defer st.draft_ms += @as(f64, @floatFromInt(std.Io.Clock.awake.now(o.e.io).toNanoseconds() - td)) / 1e6;
 diff --git a/zig/src/families/flashnext/cuda_mtp_ops.zig b/zig/src/families/flashnext/cuda_mtp_ops.zig
-index c2b8cb2..9195e52 100644
+index 4ee877ee9..fae2a2929 100644
 --- a/zig/src/families/flashnext/cuda_mtp_ops.zig
 +++ b/zig/src/families/flashnext/cuda_mtp_ops.zig
-@@ -8,6 +8,7 @@ const prompt = @import("cuda_prompt.zig");
- const gdn = @import("cuda_gdn.zig");
- const mtp = @import("cuda_mtp.zig");
- const plan = @import("cuda_mtp_plan.zig");
-+const hd = @import("cuda_host_draw.zig");
+@@ -48,9 +48,6 @@ const Draft = mtp.Draft;
+ const Chain = mtp.Chain;
+ const Pick = mtp.Pick;
+ const Sampling = mtp.Sampling;
+-const drawRow = mtp.drawRow;
+-const maskRow = mtp.maskRow;
+-const promote = mtp.promote;
  
- /// One group of lanes in the batched head's pass: the lanes' drafts, their rows and whether the head scores.
- const Group = struct {
-@@ -66,6 +67,12 @@ fn download(stream: cuda.Stream, dst: []u8, src: u64) !void {
-     try d.check(d.api.cuMemcpyDtoH_v2(dst.ptr, src, dst.len), "cuMemcpyDtoH");
- }
- 
-+/// A copy to the host with no wait: the caller has synchronised the stream and queued nothing since.
-+fn copyIdle(stream: cuda.Stream, dst: []u8, src: u64) !void {
-+    const d = stream.d;
-+    try d.check(d.api.cuMemcpyDtoH_v2(dst.ptr, src, dst.len), "cuMemcpyDtoH");
-+}
-+
- /// An owner can mirror main-model mutations to a peer without exposing device pointers on the control wire.
- pub const Main = struct {
-     ptr: *anyopaque,
-@@ -95,10 +102,10 @@ pub fn Ops(comptime Tri: type) type {
- 
-         /// Slots [0, n) of the head's candidate scratch (filled by Head.cand) on the host.
-         fn candidates(o: Self, n: usize, c: *mtp.Cands) !void {
-+            // scratch slots [0, n) are all that is read, but scratch and Cands are one layout: one wait, one copy
-+            _ = n;
-             const base = (o.h.cand_buf orelse return error.NoCandidates).ptr;
--            try download(o.stream(), std.mem.sliceAsBytes(c.vals[0 .. n * mtp.cand_max]), base);
--            try download(o.stream(), std.mem.sliceAsBytes(c.cols[0 .. n * mtp.cand_max]), base + mtp.cand_slots * mtp.cand_max * 4);
--            try download(o.stream(), std.mem.sliceAsBytes(c.flags[0..n]), base + 2 * mtp.cand_slots * mtp.cand_max * 4);
-+            try download(o.stream(), std.mem.asBytes(c), base);
-         }
- 
-         /// Prompt rows [at, stop): the pass with its streams kept, then the head over each row with a known next token.
-@@ -224,6 +231,11 @@ pub fn Ops(comptime Tri: type) type {
-                 if (c.flags[0] == 0) return mtp.drawPickCandidates(o.e.gpa, c.vals[0..count], c.cols[0..count], h.ids, lse, position, sm);
-             };
-             const row = d.host[0..n];
-+            if (hd.threads() > 0) {
-+                // the stream is idle after the best's download: the row follows it with no second wait
-+                try copyIdle(o.stream(), std.mem.sliceAsBytes(row), d.dlogits.ptr);
-+                return mtp.drawPickWith(o.e.gpa, row, h.ids, lse, position, sm, true);
-+            }
-             try download(o.stream(), std.mem.sliceAsBytes(row), d.dlogits.ptr);
-             return mtp.drawPick(o.e.gpa, row, h.ids, lse, position, sm);
-         }
-@@ -399,6 +411,22 @@ pub fn Ops(comptime Tri: type) type {
-                 };
+ fn cint(v: usize) c_int {
+     return @intCast(v);
+@@ -374,8 +371,9 @@ pub fn Ops(comptime Tri: type) type {
+             while (n_act > 0 and j < max_chain) : (j += 1) {
+                 // every active lane's best draft (fn_row_best on its own scores), then one download of all of them
+                 for (act[0..n_act], 0..) |i, r| try h.best(o.stream(), ds[i].dlogits.ptr, h.ids.len, h.ids.len, 1, ds[0].best.ptr + r * 16);
+-                const cands = try cand.Step.run(h, o.stream(), ds, act[0..n_act], sms); // TF_FLASHNEXT_SAMPLE_CAND=1
++                var cands = try cand.Step.run(h, o.stream(), ds, act[0..n_act], sms); // TF_FLASHNEXT_SAMPLE_CAND=1
                  try download(o.stream(), std.mem.sliceAsBytes(best_host[0 .. n_act * 4]), ds[0].best.ptr);
-                 if (any_cand) try o.candidates(n_act, &cands);
-+                // the sampled lanes' rows side by side (TF_FLASHNEXT_HOST_DRAW_THREADS): downloaded while the stream is idle, then
-+                // drawn by drawPickWith on the host's threads, each lane's draw the one `pick` makes
-+                var jobs: [max_lanes]hd.Job = undefined;
-+                var job_of: [max_lanes]?usize = @splat(null);
-+                var n_jobs: usize = 0;
-+                if (hd.threads() > 0) {
-+                    for (act[0..n_act], 0..) |i, r| {
-+                        if (!mtp.isSampled(sms[i]) or (cand_k[r] > 0 and cands.flags[r] == 0) or !hd.fits(sms[i], h.ids.len)) continue;
-+                        const row = ds[i].host[0..h.ids.len];
-+                        try copyIdle(o.stream(), std.mem.sliceAsBytes(row), ds[i].dlogits.ptr);
-+                        jobs[n_jobs] = .{ .row = row, .ids = h.ids, .lse = best_host[r * 4 + 1], .position = positions[i] + j, .sm = sms[i], .pick = true };
-+                        job_of[r] = n_jobs;
-+                        n_jobs += 1;
-+                    }
-+                    try hd.run(o.e.io, jobs[0..n_jobs]);
-+                }
++                try cands.drawRows(h, o.stream(), o.e.ngram.pool, ds, act[0..n_act], sms, &best_host, positions, j);
                  var next_act: usize = 0;
                  var n_step: usize = 0;
                  for (act[0..n_act], 0..) |i, r| {
-@@ -406,7 +434,9 @@ pub fn Ops(comptime Tri: type) type {
-                     const lse = best_host[r * 4 + 1];
-                     const col: usize = @intCast(@as(i32, @bitCast(best_host[r * 4 + 2])));
-                     var got: Pick = .{ .token = h.ids[col], .prob = @exp(@as(f64, top) - @as(f64, lse)) };
--                    if (mtp.isSampled(sms[i])) {
-+                    if (job_of[r]) |jb| {
-+                        got = .{ .token = jobs[jb].token, .prob = jobs[jb].prob };
-+                    } else if (mtp.isSampled(sms[i])) {
-                         if (cand_k[r] > 0 and cands.flags[r] == 0) {
-                             const at = r * mtp.cand_max;
-                             got = try mtp.drawPickCandidates(o.e.gpa, cands.vals[at..][0..cand_k[r]], cands.cols[at..][0..cand_k[r]], h.ids, lse, positions[i] + j, sms[i]);
-@@ -525,6 +555,81 @@ pub fn Ops(comptime Tri: type) type {
-             }
+@@ -503,25 +501,9 @@ pub fn Ops(comptime Tri: type) type {
+             d.pending = 0;
          }
  
-+        /// `draws` for several windows of one shared pass (`ds[i]` with `sms[i]`, `masks[i]`, results in `outs[i]`): all the device work
-+        /// is queued first (the greedy windows' bests; with TF_FLASHNEXT_SAMPLE_CAND=1 each sampled window's rows' top_k candidates,
-+        /// in their own scratch slots), then one wait and one copy a window; the whole rows of the others are drawn side by side on
-+        /// the host's threads (TF_FLASHNEXT_HOST_DRAW_THREADS), each row by drawRowWith or drawCandidates from the scores `draws`
-+        /// reads, so the tokens are `draws`'.
-+        pub fn drawsMany(o: Self, ds: []const *Draft, sms: []const ?Sampling, masks: []const []const u32, outs: []const []u32) !void {
-+            const st = o.stream();
-+            const cand_on = mtp.candidatesOn();
-+            if ((!cand_on and hd.threads() == 0) or ds.len > 32) {
-+                for (ds, sms, masks, outs) |d, sm, mk, out| try o.draws(d, sm, mk, out);
-+                return;
-+            }
-+            var slot_at: [32]usize = undefined;
-+            var slot_k: [32]usize = @splat(0);
-+            var slots: usize = 0;
-+            for (ds, sms, masks, 0..) |d, sm, mk, i| {
-+                if (!mtp.isSampled(sm) and mk.len == 0) {
-+                    try o.h.best(st, d.logits.ptr, vocab, vocab, d.rows, d.best.ptr);
-+                } else if (cand_on and mk.len == 0) if (mtp.candidateCount(sm, vocab)) |count| {
-+                    if (slots + d.rows > mtp.cand_slots) continue;
-+                    try o.h.cand(st, d.logits.ptr, vocab, vocab, d.rows, count, slots);
-+                    slot_at[i] = slots;
-+                    slot_k[i] = count;
-+                    slots += d.rows;
-+                };
-+            }
-+            try st.synchronize();
-+            var cands: mtp.Cands = undefined;
-+            if (slots > 0) try copyIdle(st, std.mem.asBytes(&cands), (o.h.cand_buf orelse return error.NoCandidates).ptr);
-+            var jobs: [32 * max_rows]hd.Job = undefined;
-+            var n_jobs: usize = 0;
-+            var by_job: [32]bool = @splat(false);
-+            for (ds, sms, masks, outs, 0..) |d, sm, mk, out, i| {
-+                const n = d.rows;
-+                if (!mtp.isSampled(sm) and mk.len == 0) {
-+                    try copyIdle(st, std.mem.sliceAsBytes(d.best_host[0 .. 4 * n]), d.best.ptr);
-+                    for (out[0..n], 0..) |*t, r| t.* = @intCast(@as(i32, @bitCast(d.best_host[4 * r + 2])));
-+                    continue;
-+                }
-+                if (slot_k[i] > 0 and std.mem.allEqual(i32, cands.flags[slot_at[i]..][0..n], 0)) {
-+                    const count = slot_k[i];
-+                    for (out[0..n], 0..) |*t, r| {
-+                        const at = (slot_at[i] + r) * mtp.cand_max;
-+                        t.* = try mtp.drawCandidates(o.e.gpa, cands.vals[at..][0..count], cands.cols[at..][0..count], null, d.fed0 + 1 + r, sm);
-+                    }
-+                    continue;
-+                }
-+                const rows = d.host[0 .. n * vocab];
-+                try copyIdle(st, std.mem.sliceAsBytes(rows), d.logits.ptr);
-+                const words = mk.len / n;
-+                by_job[i] = hd.threads() > 0 and hd.fits(sm, vocab);
-+                for (0..n) |r| {
-+                    const row = rows[r * vocab ..][0..vocab];
-+                    const mask = if (words > 0) mk[r * words ..][0..words] else &[_]u32{};
-+                    if (by_job[i]) {
-+                        jobs[n_jobs] = .{ .row = row, .mask = mask, .position = d.fed0 + 1 + r, .sm = sm };
-+                        n_jobs += 1;
-+                    } else {
-+                        if (words > 0) maskRow(row, mask);
-+                        out[r] = try drawRow(o.e.gpa, row, null, d.fed0 + 1 + r, sm);
-+                    }
-+                }
-+            }
-+            try hd.run(o.e.io, jobs[0..n_jobs]);
-+            // the tokens back in their windows, in the order the jobs were made
-+            var at: usize = 0;
-+            for (ds, outs, by_job[0..ds.len]) |d, out, jobbed| {
-+                if (!jobbed) continue;
-+                for (out[0..d.rows]) |*t| {
-+                    t.* = jobs[at].token;
-+                    at += 1;
-+                }
-+            }
-+        }
-+
+-        /// The window's rows drawn at their keyed positions (fed0 + 1 + r), each within its `masks` row if any.
+-        pub fn draws(o: Self, d: *Draft, sm: ?Sampling, masks: []const u32, out: []u32) !void {
+-            const n = d.rows;
+-            const greedy = if (sm) |s| s.temperature <= 0 else true;
+-            if (greedy and masks.len == 0) {
+-                try o.h.best(o.stream(), d.logits.ptr, vocab, vocab, n, d.best.ptr);
+-                try download(o.stream(), std.mem.sliceAsBytes(d.best_host[0 .. 4 * n]), d.best.ptr);
+-                for (out[0..n], 0..) |*t, r| t.* = @intCast(@as(i32, @bitCast(d.best_host[4 * r + 2])));
+-                return;
+-            }
+-            if (masks.len == 0 and try cand.window(o.h, o.stream(), o.e.gpa, d.logits.ptr, vocab, n, d.fed0 + 1, sm, out)) return;
+-            const rows = d.host[0 .. n * vocab];
+-            try download(o.stream(), std.mem.sliceAsBytes(rows), d.logits.ptr);
+-            const words = masks.len / n;
+-            for (out[0..n], 0..) |*t, r| {
+-                const row = rows[r * vocab ..][0..vocab];
+-                if (words > 0) maskRow(row, masks[r * words ..][0..words]);
+-                t.* = try drawRow(o.e.gpa, row, null, d.fed0 + 1 + r, sm);
+-            }
++        /// Window i's rows drawn at their keyed positions (fed0 + 1 + r) by sms[i], each in its masks[i] row if any.
++        pub fn draws(o: Self, ds: []const *Draft, sms: []const ?Sampling, masks: []const []const u32, outs: []const []u32) !void {
++            return mtp.host_draw.windows(o.h, o.stream(), o.e.gpa, o.e.ngram.pool, ds, sms, masks, outs);
+         }
+ 
          /// Keep the window's first `keep` rows (Python forward.commit) from its saved rows; a repeat is a no-op.
-         pub fn rollback(o: Self, seq: *prompt.Seq, d: *Draft, keep: usize) !void {
-             if (o.main) |m| return m.rollback(m.ptr, seq, d, keep);
 diff --git a/zig/tests/cuda/flashnext_cand_tests.zig b/zig/tests/cuda/flashnext_cand_tests.zig
-index 57d0e8b..c883068 100644
+index c9c122288..609922974 100644
 --- a/zig/tests/cuda/flashnext_cand_tests.zig
 +++ b/zig/tests/cuda/flashnext_cand_tests.zig
-@@ -11,6 +11,14 @@ const mtp = flash.mtp;
+@@ -9,6 +9,14 @@ const cand = flash.mtp.cand;
  const Rig = rig.Rig;
  
  fn tied(r: *Rig, row: []u16, levels: u8) void {
@@ -863,7 +872,7 @@ index 57d0e8b..c883068 100644
      const specials = [_]u16{ 0x0000, 0x8000, 0x7f80, 0xff80, 0x3f80, 0xbf80 };
      for (row) |*v| {
          const x = r.rng.int(u16);
-@@ -70,6 +78,43 @@ fn rows(r: *Rig, mod: cuda.Module, n: usize, count: usize, levels: u8, bad: usiz
+@@ -68,6 +76,43 @@ fn rows(r: *Rig, mod: cuda.Module, n: usize, count: usize, levels: u8, bad: usiz
      }
  }
  
@@ -882,15 +891,15 @@ index 57d0e8b..c883068 100644
 +    const host = try r.a.alloc(u16, rows_n * n);
 +    for (0..rows_n) |i| tied(r, host[i * n ..][0..n], levels);
 +    const scores = try r.dev(std.mem.sliceAsBytes(host));
-+    const vals = try r.out(rows_n * mtp.cand_max * 4);
-+    const cols = try r.out(rows_n * mtp.cand_max * 4);
++    const vals = try r.out(rows_n * cand.cand_max * 4);
++    const cols = try r.out(rows_n * cand.cand_max * 4);
 +    const flags = try r.out(rows_n * 4);
 +    var a: cuda.Args = .{};
 +    a.add(scores);
 +    a.add(@as(c_int, @intCast(n)));
 +    a.add(@as(c_longlong, @intCast(n)));
 +    a.add(@as(c_int, @intCast(count)));
-+    a.add(@as(c_int, @intCast(mtp.cand_max)));
++    a.add(@as(c_int, @intCast(cand.cand_max)));
 +    a.add(vals);
 +    a.add(cols);
 +    a.add(flags);
@@ -907,7 +916,7 @@ index 57d0e8b..c883068 100644
  pub fn run(gpu: check.Gpu) !void {
      var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
      defer arena.deinit();
-@@ -79,9 +124,18 @@ pub fn run(gpu: check.Gpu) !void {
+@@ -77,9 +122,18 @@ pub fn run(gpu: check.Gpu) !void {
      var mod = try cuda.Module.load(gpu.d, cuda.kernels.flashnext_mtp);
      defer mod.unload();
      // the draft head's width (79,591), the vocabulary's (248,320), and short rows; many ties through almost none

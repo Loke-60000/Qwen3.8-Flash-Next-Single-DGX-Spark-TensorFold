@@ -1,0 +1,1087 @@
+diff --git a/docs/recipes/flash-next-cuda.md b/docs/recipes/flash-next-cuda.md
+index 871237f50..1ec982df5 100644
+--- a/docs/recipes/flash-next-cuda.md
++++ b/docs/recipes/flash-next-cuda.md
+@@ -83,11 +83,12 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
+   tail, plus 28 KiB a token of keys, values and indexer keys, and with drafts its MTP head's cache.
+ - `--kv-cache fp8` (one rank, the engine's own glue; not with `--tp` or `--slide`) keeps keys and values as e4m3 codes
+   with a power-of-two scale a position and KV head: 1,056 bytes a position and layer instead of 2,048, so a token's
+-  caches take about 17.5 KiB instead of 30 KiB (12 layers and the MTP head's). The indexer's keys, the pooled blocks and
+-  the DeltaNet states stay bf16. Attention reads the codes widened to bf16 exactly, so it is the bf16 kernels'
+-  arithmetic on rows rounded to e4m3: lossy against a bf16 cache, deterministic for a given prompt. It covers contiguous
+-  and paged caches (`TF_FLASHNEXT_KV_PAGES`), `TF_FLASHNEXT_ATTN_LANES=1`, images and video, the prompt cache and
+-  `--learn-conversations`. bf16 stays the default.
++  caches take about 18.4 KiB instead of 30 KiB (12 layers in fp8, the MTP head's own cache in bf16: fp8 rows there cost
++  it about a fifth of its accepted drafts; `TF_FLASHNEXT_HEAD_KV=fp8` puts it in fp8 too, 17.5 KiB). The indexer's keys,
++  the pooled blocks and the DeltaNet states stay bf16. Attention reads the codes widened to bf16 exactly, so it is the
++  bf16 kernels' arithmetic on rows rounded to e4m3: lossy against a bf16 cache, deterministic for a given prompt. It
++  covers contiguous and paged caches (`TF_FLASHNEXT_KV_PAGES`), `TF_FLASHNEXT_ATTN_LANES=1`, images and video, the
++  prompt cache and `--learn-conversations`. bf16 stays the default.
+ - `--no-drafts` serves without the MTP head; `"draft": false` on a request does the same for that request.
+ - `TF_FLASHNEXT_READOUT_ROWS` (default 64, `0` never) is the rows from which the hyper-connection read-out takes the prompt
+   tiles. Same bits either way; `128` keeps 16-stream decode rounds on the row kernels, up to 7% quicker on a GB10.
+diff --git a/zig/src/families/flashnext/cuda_disk.zig b/zig/src/families/flashnext/cuda_disk.zig
+index 9a0ddf67c..50a8e61fb 100644
+--- a/zig/src/families/flashnext/cuda_disk.zig
++++ b/zig/src/families/flashnext/cuda_disk.zig
+@@ -12,14 +12,15 @@ const Allocator = std.mem.Allocator;
+ const words = 32; // the n-gram history, the position, whether the MTP head's rows follow
+ const Words = extern struct { history: [2]i64, at: u64, head: u64 };
+ 
+-/// The image's parts at `at`: words, DeltaNet tails and states, each attention piece by layer, the tail, the head's.
+-pub fn partsOf(kv: Kv, at: u32, head: bool, out: *std.ArrayList(rows.image.Part), a: Allocator) !void {
++/// The image's parts at `at`: words, DeltaNet tails and states, each attention piece by layer, the tail, the head's
++/// (in its format `head`).
++pub fn partsOf(kv: Kv, at: u32, head: ?Kv, out: *std.ArrayList(rows.image.Part), a: Allocator) !void {
+     try out.append(a, .{ .bytes = words });
+     try out.append(a, .{ .bytes = sh.linear * sh.conv });
+     try out.append(a, .{ .bytes = sh.linear * sh.state });
+     try attention(kv, at, sh.attn, out, a);
+     try out.append(a, .{ .bytes = sh.tail });
+-    if (head) try attention(kv, at, 1, out, a);
++    if (head) |h| try attention(h, at, 1, out, a);
+ }
+ 
+ /// As cuda_snap.zig's move lays them: every layer's keys, then values, indexer keys, and pooled rows of `ratio`.
+@@ -41,8 +42,13 @@ pub fn Kept(comptime F: type) type {
+             return @ptrCast(@alignCast(ptr));
+         }
+ 
++        /// The format of the head's rows a state of this server holds, or null: it does not draft.
++        fn headKv(c: *const F.Cuda) ?Kv {
++            return if (c.head) |h| h.kv else null;
++        }
++
+         fn parts(ptr: *anyopaque, at: u32, out: *std.ArrayList(rows.image.Part), a: Allocator) anyerror!void {
+-            try partsOf(of(ptr).engine.kv, at, of(ptr).head != null, out, a);
++            try partsOf(of(ptr).engine.kv, at, headKv(of(ptr)), out, a);
+         }
+ 
+         fn copy(c: *F.Cuda, st: *snap.Snap, ranges: []const rows.image.Range, host: []u8, out: bool) !void {
+@@ -90,7 +96,7 @@ pub fn Kept(comptime F: type) type {
+             const head = c.head != null;
+             const st = try c.gpa.create(snap.Snap);
+             errdefer c.gpa.destroy(st);
+-            st.* = .{ .buf = try cuda.DeviceBuffer.alloc(c.engine.driver, snap.bytes(c.engine.kv, at, head)), .at = at, .history = .{ 0, 0 }, .head = head };
++            st.* = .{ .buf = try cuda.DeviceBuffer.alloc(c.engine.driver, snap.bytes(c.engine.kv, at, headKv(c))), .at = at, .history = .{ 0, 0 }, .head = head };
+             return @ptrCast(st);
+         }
+ 
+@@ -146,7 +152,7 @@ pub fn Kept(comptime F: type) type {
+ 
+ test "the image covers a state's device bytes once, its rows split into 256-token blocks, with and without the head" {
+     const a = std.testing.allocator;
+-    for ([_]Kv{ .bf16, .fp8 }) |kv| for ([_]bool{ false, true }) |head| for ([_]u32{ 1, 3, 256, 1000, 4137 }) |at| {
++    for ([_]Kv{ .bf16, .fp8 }) |kv| for ([_]?Kv{ null, kv, .bf16 }) |head| for ([_]u32{ 1, 3, 256, 1000, 4137 }) |at| {
+         var parts: std.ArrayList(rows.image.Part) = .empty;
+         defer parts.deinit(a);
+         try partsOf(kv, at, head, &parts, a);
+@@ -157,7 +163,7 @@ test "the image covers a state's device bytes once, its rows split into 256-toke
+ 
+ test "the image's parts are cuda_snap.move's pieces in its order: sizes, offsets and rows, with and without the head" {
+     const a = std.testing.allocator;
+-    for ([_]Kv{ .bf16, .fp8 }) |kv| for ([_]bool{ false, true }) |head| for ([_]u32{ 0, 1, 3, 4, 255, 256, 1000, 4136, 4137 }) |at| {
++    for ([_]Kv{ .bf16, .fp8 }) |kv| for ([_]?Kv{ null, kv, .bf16 }) |head| for ([_]u32{ 0, 1, 3, 4, 255, 256, 1000, 4136, 4137 }) |at| {
+         var parts: std.ArrayList(rows.image.Part) = .empty;
+         defer parts.deinit(a);
+         try partsOf(kv, at, head, &parts, a);
+@@ -216,7 +222,7 @@ const OneCopy = struct {
+ 
+ /// A Flash Next namespace whose Cuda has just the fields its image reads, and no MTP head.
+ const Bare = struct {
+-    pub const Cuda = struct { gpa: Allocator, engine: struct { driver: *const cuda.Driver, kv: Kv = .bf16 }, head: ?*anyopaque = null, stream: cuda.Stream };
++    pub const Cuda = struct { gpa: Allocator, engine: struct { driver: *const cuda.Driver, kv: Kv = .bf16 }, head: ?*const struct { kv: Kv } = null, stream: cuda.Stream };
+ };
+ 
+ test "Flash Next completion: a kept state's copy out or in that fails part way drains the copies it queued" {
+diff --git a/zig/src/families/flashnext/cuda_glue.zig b/zig/src/families/flashnext/cuda_glue.zig
+index a43866a7c..94d07462e 100644
+--- a/zig/src/families/flashnext/cuda_glue.zig
++++ b/zig/src/families/flashnext/cuda_glue.zig
+@@ -127,7 +127,6 @@ pub const Glue = struct {
+         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
+         var g: Glue = undefined;
+         g.mixed = mixedFromEnv();
+-        g.kv = kv;
+         g.hc = try cuda.Module.load(d, cuda.kernels.flashnext_hc);
+         errdefer g.hc.unload();
+         g.attn = try cuda.Module.load(d, cuda.kernels.flashnext_attn);
+@@ -162,8 +161,8 @@ pub const Glue = struct {
+             .ple_gate = try g.hc.function("fn_ple_gate"),
+             .ple_conv = try g.hc.function("fn_ple_conv"),
+             .add_streams = try g.hc.function("fn_add_streams"),
+-            .prep = try cacheFn(g.attn, kv, "fn_attn_prep"),
+-            .prep_media = try cacheFn(g.attn, kv, "fn_attn_prep_media"),
++            .prep = undefined,
++            .prep_media = undefined,
+             .pool_media = try g.attn.function("fn_qsa_pool_media"),
+             .gate = try g.attn.function("fn_attn_gate"),
+             .pool = try g.attn.function("fn_qsa_pool"),
+@@ -171,32 +170,56 @@ pub const Glue = struct {
+             .scores_tile = try g.attn.function("_ZN8qsa_tile6scoresILi8ELi4EEEvPK13__nv_bfloat16S3_PKiPfiiii"),
+             .chunks = try g.attn.function("fn_attn_chunks"),
+             .chunks_ahead = try g.attn.function("fn_attn_chunks_ahead"),
+-            .chunks_one = try cacheFn(g.attn, kv, "fn_attn_chunks_one"),
+-            .fused = try cacheFn(g.attn, kv, "fn_attn_fused"),
++            .chunks_one = undefined,
++            .fused = undefined,
+             .merge = try g.attn.function("fn_attn_merge"),
+-            .prep_paged = try cacheFn(g.attn, kv, "fn_attn_prep_paged"),
+-            .prep_media_paged = try cacheFn(g.attn, kv, "fn_attn_prep_media_paged"),
++            .prep_paged = undefined,
++            .prep_media_paged = undefined,
+             .pool_paged = try g.attn.function("fn_qsa_pool_paged"),
+             .pool_media_paged = try g.attn.function("fn_qsa_pool_media_paged"),
+             .scores_paged = try g.attn.function("fn_qsa_scores_paged"),
+             .chunks_ahead_paged = try g.attn.function("fn_attn_chunks_ahead_paged"),
+-            .prep_lanes = try cacheFn(g.attn, kv, "fn_attn_prep_lanes"),
++            .prep_lanes = undefined,
+             .pool_lanes = try g.attn.function("fn_qsa_pool_lanes"),
+             .scores_lanes = try g.attn.function("fn_qsa_scores_lanes"),
+-            .chunks_lanes = try cacheFn(g.attn, kv, "fn_attn_chunks_lanes"),
++            .chunks_lanes = undefined,
+             .merge_lanes = try g.attn.function("fn_attn_merge_lanes"),
+-            .chunks_one_paged = try cacheFn(g.attn, kv, "fn_attn_chunks_one_paged"),
+-            .fused_paged = try cacheFn(g.attn, kv, "fn_attn_fused_paged"),
++            .chunks_one_paged = undefined,
++            .fused_paged = undefined,
+         };
+         try g.f.chunks.allowDynamicShared(chunkSmem(1));
+         try g.f.chunks_ahead.allowDynamicShared(chunkSmem(2));
++        try g.f.chunks_ahead_paged.allowDynamicShared(chunkSmem(2));
++        try g.cacheFns(kv);
++        return g;
++    }
++
++    /// This glue with the cache launches for caches in format `kv` (the MTP head's own, cuda_kv.zig headFor): the same
++    /// modules, so it is never unloaded on its own.
++    pub fn withKv(g: *const Glue, kv: Kv) !Glue {
++        var h = g.*;
++        try h.cacheFns(kv);
++        return h;
++    }
++
++    /// The launches that write or read the attention caches, for caches in format `kv`.
++    fn cacheFns(g: *Glue, kv: Kv) !void {
++        g.kv = kv;
++        g.f.prep = try cacheFn(g.attn, kv, "fn_attn_prep");
++        g.f.prep_media = try cacheFn(g.attn, kv, "fn_attn_prep_media");
++        g.f.chunks_one = try cacheFn(g.attn, kv, "fn_attn_chunks_one");
++        g.f.fused = try cacheFn(g.attn, kv, "fn_attn_fused");
++        g.f.prep_paged = try cacheFn(g.attn, kv, "fn_attn_prep_paged");
++        g.f.prep_media_paged = try cacheFn(g.attn, kv, "fn_attn_prep_media_paged");
++        g.f.prep_lanes = try cacheFn(g.attn, kv, "fn_attn_prep_lanes");
++        g.f.chunks_lanes = try cacheFn(g.attn, kv, "fn_attn_chunks_lanes");
++        g.f.chunks_one_paged = try cacheFn(g.attn, kv, "fn_attn_chunks_one_paged");
++        g.f.fused_paged = try cacheFn(g.attn, kv, "fn_attn_fused_paged");
+         try g.f.chunks_one.allowDynamicShared(oneSmem());
+         try g.f.fused.allowDynamicShared(oneSmem());
+-        try g.f.chunks_ahead_paged.allowDynamicShared(chunkSmem(2));
+         try g.f.chunks_lanes.allowDynamicShared(if (kv == .fp8) oneSmem() else chunkSmem(2));
+         try g.f.chunks_one_paged.allowDynamicShared(oneSmem());
+         try g.f.fused_paged.allowDynamicShared(oneSmem());
+-        return g;
+     }
+ 
+     /// A cache kernel by its bf16 name, or its fp8 twin (the same arguments, the caches as cuda_kv.zig's rows).
+diff --git a/zig/src/families/flashnext/cuda_images_test.zig b/zig/src/families/flashnext/cuda_images_test.zig
+index 2151b7cdf..bebb5f9b7 100644
+--- a/zig/src/families/flashnext/cuda_images_test.zig
++++ b/zig/src/families/flashnext/cuda_images_test.zig
+@@ -46,6 +46,8 @@ fn run(comptime Cuda: type, comptime open: anytype, comptime drop: anytype, draf
+     var ids = [_]u32{1};
+     var head: mtp.Head = undefined;
+     head.ids = &ids;
++    head.kv = .bf16;
++    head.glue = null;
+     var v: images.Vision = undefined;
+     v.a = a;
+     v.limits = .{};
+diff --git a/zig/src/families/flashnext/cuda_kv.zig b/zig/src/families/flashnext/cuda_kv.zig
+index 7d96064ce..79a78df96 100644
+--- a/zig/src/families/flashnext/cuda_kv.zig
++++ b/zig/src/families/flashnext/cuda_kv.zig
+@@ -15,7 +15,8 @@
+ const std = @import("std");
+ const wt = @import("cuda_prompt_wt.zig");
+ 
+-/// The attention caches' format of an engine; every sequence, draft cache and kept state of it uses the same one.
++/// The attention caches' format of an engine; every sequence of it uses the same one, and every MTP head cache its
++/// own (headFor).
+ pub const Kv = enum {
+     bf16,
+     fp8,
+@@ -47,6 +48,16 @@ pub const Kv = enum {
+     }
+ };
+ 
++/// The MTP head's own cache's format under main caches in `main`, by TF_FLASHNEXT_HEAD_KV (`setting`): bf16 when unset.
++/// The head is one layer and its drafts are only proposals, but fp8 rows there cost it about a fifth of its accepted
++/// drafts, for (2,048 - 1,056) bytes a position saved; "fp8" keeps the head's cache in `main` too.
++pub fn headFor(main: Kv, setting: ?[]const u8) !Kv {
++    const v = setting orelse return .bf16;
++    if (std.mem.eql(u8, v, "bf16")) return .bf16;
++    if (std.mem.eql(u8, v, "fp8")) return main;
++    return error.BadHeadKv;
++}
++
+ /// Bytes after an FP8 key row's codes: s_k and s_v (fp32) and 8 zero bytes, so rows stay 16-byte aligned.
+ pub const key_trailer = 16;
+ /// An FP8 key row: head_dim codes and the trailer.
+@@ -213,6 +224,20 @@ test "the README's per-token figures: 13 layers of 1,376 bytes, 17,888 fp8 again
+     try std.testing.expectEqual(@as(usize, 30784), 13 * (Kv.bf16.position() + pooled));
+ }
+ 
++test "the MTP head's cache: bf16 unless TF_FLASHNEXT_HEAD_KV=fp8 keeps it in the main format; other values refused" {
++    for ([_]Kv{ .bf16, .fp8 }) |main| {
++        try std.testing.expectEqual(Kv.bf16, try headFor(main, null));
++        try std.testing.expectEqual(Kv.bf16, try headFor(main, "bf16"));
++        try std.testing.expectEqual(main, try headFor(main, "fp8"));
++        for ([_][]const u8{ "", "fp16", "FP8", "1" }) |v| try std.testing.expectError(error.BadHeadKv, headFor(main, v));
++    }
++}
++
++test "the README's per-token figures with the head's cache in bf16 under fp8: 12 layers of 1,376 bytes and 2,368" {
++    const pooled = wt.index_dim * 2 / wt.index_ratio;
++    try std.testing.expectEqual(@as(usize, 18880), 12 * (Kv.fp8.position() + pooled) + Kv.bf16.position() + pooled);
++}
++
+ test "the e4m3 table: 126 finite magnitudes, 448 at the top, 2^-9 at the bottom, NaN at 0x7F" {
+     try std.testing.expectEqual(@as(f32, 448.0), decode(0x7E));
+     try std.testing.expectEqual(@as(f32, 0x1p-9), decode(1));
+diff --git a/zig/src/families/flashnext/cuda_kv_lanes.zig b/zig/src/families/flashnext/cuda_kv_lanes.zig
+index 1c0960910..c1049f861 100644
+--- a/zig/src/families/flashnext/cuda_kv_lanes.zig
++++ b/zig/src/families/flashnext/cuda_kv_lanes.zig
+@@ -44,15 +44,16 @@ fn seqRunBytes() usize {
+     return wt.linear_n * (al(conv_bytes) + al(state_bytes)) + al(tail_bytes);
+ }
+ 
+-/// The MTP head a drafting lane runs: its draft vocabulary and the widest prompt chunk whose streams it keeps.
+-pub const Head = struct { draft_n: usize, rows: usize };
++/// The MTP head a drafting lane runs: its draft vocabulary, the widest prompt chunk whose streams it keeps, its cache's
++/// format (Head.kv).
++pub const Head = struct { draft_n: usize, rows: usize, kv: Format };
+ 
+-/// Fixed: a lane's table and `extra` (image rows); paged: the attention caches (the head's too) in format `format`; a
+-/// run: the states.
++/// Fixed: a lane's table and `extra` (image rows); paged: the attention caches in format `format` (the head's in its
++/// own); a run: the states.
+ pub fn layout(format: Format, capacity: usize, tokens: usize, head: ?Head, extra: usize) kv.Layout {
+-    const layers = wt.attn_n + @intFromBool(head != null);
++    const head_kv: ?Format = if (head) |h| h.kv else null;
+     const run = seqRunBytes() + if (head) |h| mtp.Draft.runBytes(h.draft_n, h.rows) else 0;
+-    return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + extra, .token_bytes = pages.pageBytesOf(format, tokens, layers) / tokens, .page_tokens = @intCast(tokens), .snap_bytes = snap.bytes(format, 0, head != null), .run_bytes = run };
++    return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + extra, .token_bytes = pages.pageBytesOf(format, tokens, head_kv) / tokens, .page_tokens = @intCast(tokens), .snap_bytes = snap.bytes(format, 0, head_kv), .run_bytes = run };
+ }
+ 
+ /// Where a stream's caches came from: no pool, the one stream on its own caches beside a pool, or a pool lane.
+@@ -139,7 +140,7 @@ pub const Pool = struct {
+         const d = p.e.driver;
+         var table = try cuda.DeviceBuffer.alloc(d, mostPages(p.capacity, p.layout.page_tokens) * 4);
+         errdefer table.free();
+-        const paged: pages.Paged = .{ .base = p.arena.ptr, .table = table, .ids = &.{}, .tokens = p.layout.page_tokens, .own_ids = false, .layers = wt.attn_n + @intFromBool(p.head != null), .kv = p.e.kv };
++        const paged: pages.Paged = .{ .base = p.arena.ptr, .table = table, .ids = &.{}, .tokens = p.layout.page_tokens, .own_ids = false, .kv = p.e.kv, .head = if (p.head) |h| h.kv else null };
+         const conv = try gpa.alloc(cuda.DeviceBuffer, wt.linear_n);
+         errdefer gpa.free(conv);
+         const state = try gpa.alloc(cuda.DeviceBuffer, wt.linear_n);
+@@ -273,12 +274,18 @@ pub const Pool = struct {
+ test "a stream's pages: its rows and a drafted window, no more than a full window's" {
+     const l = layout(.bf16, 40960, 256, null, 0);
+     try std.testing.expectEqual(pages.pageBytes(.bf16, 256), l.pageBytes());
+-    const h = layout(.bf16, 40960, 256, .{ .draft_n = 32768, .rows = 1536 }, 0);
+-    try std.testing.expectEqual(pages.pageBytesOf(.bf16, 256, wt.attn_n + 1), h.pageBytes());
++    const h = layout(.bf16, 40960, 256, .{ .draft_n = 32768, .rows = 1536, .kv = .bf16 }, 0);
++    try std.testing.expectEqual(pages.pageBytesOf(.bf16, 256, .bf16), h.pageBytes());
++    try std.testing.expectEqual(pages.layerBytes(.bf16, 256) * (wt.attn_n + 1), h.pageBytes());
+     // fp8 pages hold the same positions in 1,056 bytes of keys and values a layer where bf16 takes 2,048
+-    const f = layout(.fp8, 40960, 256, .{ .draft_n = 32768, .rows = 1536 }, 0);
+-    try std.testing.expectEqual(pages.pageBytesOf(.fp8, 256, wt.attn_n + 1), f.pageBytes());
++    const f = layout(.fp8, 40960, 256, .{ .draft_n = 32768, .rows = 1536, .kv = .fp8 }, 0);
++    try std.testing.expectEqual(pages.pageBytesOf(.fp8, 256, .fp8), f.pageBytes());
+     try std.testing.expectEqual(@as(u64, (wt.attn_n + 1) * (2048 - 1056)), h.token_bytes - f.token_bytes);
++    // the head's cache in bf16 beside fp8 layers: its share of a page and of a kept state in bf16
++    const fh = layout(.fp8, 40960, 256, .{ .draft_n = 32768, .rows = 1536, .kv = .bf16 }, 0);
++    try std.testing.expectEqual(@as(u64, 2048 - 1056), fh.token_bytes - f.token_bytes);
++    try std.testing.expectEqual(snap.bytes(.fp8, 0, .bf16), fh.snap_bytes);
++    try std.testing.expectEqual(f.run_bytes, fh.run_bytes);
+     try std.testing.expect(h.run_bytes >= seqRunBytes() + mtp.Draft.runBytes(32768, 1536));
+     try std.testing.expectEqual(@as(usize, 161), mostPages(40960, 256));
+     try std.testing.expect(l.pages(40960 + window_rows) <= mostPages(40960, 256));
+diff --git a/zig/src/families/flashnext/cuda_lanes.zig b/zig/src/families/flashnext/cuda_lanes.zig
+index 6b4b879c9..d531d9bf9 100644
+--- a/zig/src/families/flashnext/cuda_lanes.zig
++++ b/zig/src/families/flashnext/cuda_lanes.zig
+@@ -306,8 +306,8 @@ pub fn Namespace(comptime Tri: type) type {
+                 }
+                 if (drafting and from != .pool and l.part_seq != null) {
+                     l.part_draft = try Parts.take(&self.parts.drafts, self.engine.driver, mtp.Draft.partsBytes(self.head.?.ids.len, self.engine.chunk));
+-                    l.draft = try mtp.Draft.initParts(self.engine.kv, self.gpa, self.engine.driver, self.stream, cap, self.head.?.ids.len, self.engine.chunk, l.part_draft.?);
+-                } else if (drafting) l.draft = if (from == .pool) try self.kv.pool.?.draft(&l.seq, cap) else try mtp.Draft.initFor(self.engine.kv, self.gpa, self.engine.driver, self.stream, cap, self.head.?.ids.len, self.engine.chunk);
++                    l.draft = try mtp.Draft.initParts(self.head.?.kv, self.gpa, self.engine.driver, self.stream, cap, self.head.?.ids.len, self.engine.chunk, l.part_draft.?);
++                } else if (drafting) l.draft = if (from == .pool) try self.kv.pool.?.draft(&l.seq, cap) else try mtp.Draft.initFor(self.head.?.kv, self.gpa, self.engine.driver, self.stream, cap, self.head.?.ids.len, self.engine.chunk);
+                 if (s.images.len != 0) {
+                     const v = self.vision orelse return error.VisionNotEnabled;
+                     l.seq.media = try v.state(ids, s.images);
+@@ -582,12 +582,12 @@ pub fn Namespace(comptime Tri: type) type {
+             _ = @import("cuda_score.zig").CapabilityCases(Cuda);
+         }
+ 
+-        test "a bad TF_FLASHNEXT_CHUNK, _CHUNK_SOLO, _LOAD_THREADS or _PROMPT_EXPERT_TILE(_ROWS) is refused at load before the loader takes a stream, a module or a buffer" {
++        test "a bad TF_FLASHNEXT_CHUNK, _CHUNK_SOLO, _LOAD_THREADS, _PROMPT_EXPERT_TILE(_ROWS) or _HEAD_KV is refused at load before the loader takes a stream, a module or a buffer" {
+             const env = @import("sys").env;
+             // every driver entry point undefined: the refusal must come before the first call
+             var driver: cuda.Driver = undefined;
+             const ctx: cuda.Context = .{ .d = &driver, .device = 0, .handle = null };
+-            for ([_]struct { [*:0]const u8, [*:0]const u8, anyerror }{ .{ "TF_FLASHNEXT_CHUNK", "0", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK", "16385", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK", "4k", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK_SOLO", "1024", error.BadChunk }, .{ "TF_FLASHNEXT_LOAD_THREADS", "0", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "33", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "8x", error.BadLoadThreads }, .{ "TF_FLASHNEXT_PROMPT_EXPERT_TILE", "3", error.BadPromptExpertTile }, .{ "TF_FLASHNEXT_PROMPT_EXPERT_TILE_ROWS", "0", error.BadPromptExpertTile } }) |bad| {
++            for ([_]struct { [*:0]const u8, [*:0]const u8, anyerror }{ .{ "TF_FLASHNEXT_CHUNK", "0", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK", "16385", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK", "4k", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK_SOLO", "1024", error.BadChunk }, .{ "TF_FLASHNEXT_LOAD_THREADS", "0", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "33", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "8x", error.BadLoadThreads }, .{ "TF_FLASHNEXT_PROMPT_EXPERT_TILE", "3", error.BadPromptExpertTile }, .{ "TF_FLASHNEXT_PROMPT_EXPERT_TILE_ROWS", "0", error.BadPromptExpertTile }, .{ "TF_FLASHNEXT_HEAD_KV", "fp16", error.BadHeadKv } }) |bad| {
+                 _ = env.setenv(bad[0], bad[1], 1);
+                 defer _ = env.unsetenv(bad[0]);
+                 try std.testing.expectError(bad[2], open(std.testing.allocator, std.testing.io, &ctx, "no-such-checkpoint", null, .{ .context = 4096, .drafts = true }));
+diff --git a/zig/src/families/flashnext/cuda_lanes_admission_test.zig b/zig/src/families/flashnext/cuda_lanes_admission_test.zig
+index 16b87a2d3..b0ad850ef 100644
+--- a/zig/src/families/flashnext/cuda_lanes_admission_test.zig
++++ b/zig/src/families/flashnext/cuda_lanes_admission_test.zig
+@@ -21,6 +21,8 @@ fn run(comptime Cuda: type, comptime open: anytype, comptime drop: anytype, coun
+     var ids = [_]u32{1};
+     var head: mtp.Head = undefined;
+     head.ids = &ids;
++    head.kv = .bf16;
++    head.glue = null;
+     var streams: [8]lanes.Stream = undefined;
+     var made: usize = 0;
+     defer for (streams[0..made]) |*s| s.deinit(a);
+diff --git a/zig/src/families/flashnext/cuda_lanes_load.zig b/zig/src/families/flashnext/cuda_lanes_load.zig
+index 9f64a369b..b32eb1758 100644
+--- a/zig/src/families/flashnext/cuda_lanes_load.zig
++++ b/zig/src/families/flashnext/cuda_lanes_load.zig
+@@ -21,6 +21,8 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
+     const chunk = try @import("cuda_chunk.zig").soloRows(try prompt.chunkRows()); // the largest pass, solo or not
+     _ = try @import("cuda_modelopt_threads.zig").configured(); // TF_FLASHNEXT_LOAD_THREADS, refused before any load
+     _ = try @import("cuda_nvfp4_tile.zig").choice(o.tp); // TF_FLASHNEXT_PROMPT_EXPERT_TILE and _ROWS, likewise
++    // the MTP head's own cache: bf16 beside fp8 layers unless TF_FLASHNEXT_HEAD_KV=fp8, likewise
++    const head_kv = try @import("cuda_kv.zig").headFor(if (o.kv8) .fp8 else .bf16, if (std.c.getenv("TF_FLASHNEXT_HEAD_KV")) |v| std.mem.span(v) else null);
+     const mode = try config.mode(gpa, io, dir);
+     if (o.tp != 1 and mode != .modelopt) return error.FlashNextRanksNeedModelopt;
+     if (o.tp != 1 and captured != null) return error.FlashNextRanksOnCapturedGlue;
+@@ -84,6 +86,11 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
+     // the MTP head unless --no-drafts (TF_FLASHNEXT_DRAFTS and _CONFIDENCE: the chain's rule, 6 and 0.60)
+     if (o.drafts and (o.tp == 1 or o.rank == 0)) {
+         own.head = try mtp.Head.init(gpa, io, driver, &own.stream, dir);
++        own.head.?.kv = head_kv;
++        if (head_kv != kv) {
++            own.head.?.glue = try own.glue.withKv(head_kv);
++            std.log.info("flashnext: the MTP head's own cache in {s} beside {s} layers", .{ @tagName(head_kv), @tagName(kv) });
++        }
+         own.depth = @max(1, @min(mtp.max_chain, F.envUsize("TF_FLASHNEXT_DRAFTS", mtp.default_depth)));
+         if (std.c.getenv("TF_FLASHNEXT_CONFIDENCE")) |v| own.confidence = std.fmt.parseFloat(f64, std.mem.span(v)) catch mtp.default_confidence;
+         own.product_streams = F.envUsize("TF_FLASHNEXT_PRODUCT_STREAMS", 2);
+@@ -102,13 +109,13 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
+     const own_seq_bytes = try prompt.seqBytesPaged(kv, window, try @import("cuda_pages.zig").pageTest());
+     var stream_bytes = own_seq_bytes;
+     if (own.head) |h| {
+-        stream_bytes += mtp.Draft.bytes(kv, window, h.ids.len, own.engine.chunk);
+-    } else if (o.drafts and o.tp == 2) stream_bytes += mtp.Draft.bytes(kv, window, 1, own.engine.chunk);
++        stream_bytes += mtp.Draft.bytes(h.kv, window, h.ids.len, own.engine.chunk);
++    } else if (o.drafts and o.tp == 2) stream_bytes += mtp.Draft.bytes(head_kv, window, 1, own.engine.chunk);
+     if (o.vision) |v| stream_bytes += @as(usize, v.image_tokens) * @import("cuda_prompt_wt.zig").dims * 2 + 16 * o.context;
+     if (page_tokens > 0) {
+         // the lane's head runs at the engine's chunk: its cache on the stream's pages, its buffers in the run
+-        own.kv.head = if (own.head) |h| .{ .draft_n = h.ids.len, .rows = own.engine.chunk } else null;
+-        const head_bytes = if (own.head) |h| mtp.Draft.bytes(kv, window, h.ids.len, own.engine.chunk) else 0;
++        own.kv.head = if (own.head) |h| .{ .draft_n = h.ids.len, .rows = own.engine.chunk, .kv = h.kv } else null;
++        const head_bytes = if (own.head) |h| mtp.Draft.bytes(h.kv, window, h.ids.len, own.engine.chunk) else 0;
+         own.kv.layout = @import("cuda_kv_lanes.zig").layout(kv, o.context, page_tokens, own.kv.head, stream_bytes - own_seq_bytes - head_bytes);
+     }
+     return .{
+diff --git a/zig/src/families/flashnext/cuda_lanes_restore_test.zig b/zig/src/families/flashnext/cuda_lanes_restore_test.zig
+index a6b7f6cba..21378ba8f 100644
+--- a/zig/src/families/flashnext/cuda_lanes_restore_test.zig
++++ b/zig/src/families/flashnext/cuda_lanes_restore_test.zig
+@@ -81,6 +81,8 @@ pub fn run(comptime Cuda: type, comptime open: anytype, comptime restore: anytyp
+     var ids = [_]u32{1};
+     var head: mtp.Head = undefined;
+     head.ids = &ids;
++    head.kv = .bf16;
++    head.glue = null;
+     var self: Cuda = undefined;
+     self.gpa = a;
+     self.context = 1024;
+diff --git a/zig/src/families/flashnext/cuda_lanes_snap.zig b/zig/src/families/flashnext/cuda_lanes_snap.zig
+index aa53167dc..75d430aa0 100644
+--- a/zig/src/families/flashnext/cuda_lanes_snap.zig
++++ b/zig/src/families/flashnext/cuda_lanes_snap.zig
+@@ -9,7 +9,7 @@ pub fn Snaps(comptime Cuda: type) type {
+         }
+ 
+         pub fn bytes(ptr: *anyopaque, at: u32) u64 {
+-            return snap.bytes(of(ptr).engine.kv, at, of(ptr).head != null);
++            return snap.bytes(of(ptr).engine.kv, at, if (of(ptr).head) |h| h.kv else null);
+         }
+ 
+         /// The owner stream's state, its prompt pass standing at `at` (a drafting stream's with the head's rows).
+diff --git a/zig/src/families/flashnext/cuda_mtp.zig b/zig/src/families/flashnext/cuda_mtp.zig
+index 748385b73..687471556 100644
+--- a/zig/src/families/flashnext/cuda_mtp.zig
++++ b/zig/src/families/flashnext/cuda_mtp.zig
+@@ -8,6 +8,8 @@ const load = @import("cuda_prompt_load.zig");
+ const batch = @import("cuda_batch.zig");
+ const prompt = @import("cuda_prompt.zig");
+ const gdn = @import("cuda_gdn.zig");
++const Kv = @import("cuda_kv.zig").Kv;
++const Glue = @import("cuda_glue.zig").Glue;
+ 
+ const dims = wt.dims;
+ const streams = wt.streams;
+@@ -261,12 +263,19 @@ pub const Head = struct {
+     /// fn_row_cand and its outputs' scratch (cuda_mtp_cand.zig), with TF_FLASHNEXT_SAMPLE_CAND=1 at load.
+     cand_fn: ?cuda.Function,
+     cand_buf: ?cuda.DeviceBuffer,
++    /// The format of its own attention cache (cuda_kv.zig headFor: bf16 under fp8 main caches), set at load.
++    kv: Kv,
++    /// The engine's glue with the cache launches for `kv` when the main caches are in another format, else null: the
++    /// engine's. It shares the engine glue's modules.
++    glue: ?Glue,
+ 
+     pub fn init(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, dir: []const u8) !*Head {
+         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
+         const h = try gpa.create(Head);
+         errdefer gpa.destroy(h);
+         h.gpa = gpa;
++        h.kv = .bf16;
++        h.glue = null;
+         var store = try wt.Store.open(gpa, io, dir);
+         defer store.deinit();
+         try store.detectNorms();
+diff --git a/zig/src/families/flashnext/cuda_mtp_draft.zig b/zig/src/families/flashnext/cuda_mtp_draft.zig
+index c6554b13d..5995e5ad9 100644
+--- a/zig/src/families/flashnext/cuda_mtp_draft.zig
++++ b/zig/src/families/flashnext/cuda_mtp_draft.zig
+@@ -54,6 +54,8 @@ pub const Draft = struct {
+     pooled: cuda.DeviceBuffer,
+     /// The cache's pages (a pool lane's: its stream's, the layer after the model's), or contiguous.
+     pg: @import("cuda_glue.zig").Pg = .{},
++    /// The format of the cache's key and value rows (Head.kv).
++    kv: Kv = .bf16,
+     /// Entries the head's cache holds (Python mtp_len), the last `drafted` of them a chain's.
+     len: usize = 0,
+     drafted: usize = 0,
+@@ -136,9 +138,9 @@ pub const Draft = struct {
+         return initFor(.bf16, gpa, driver, stream, cap, draft_n, rows);
+     }
+ 
+-    /// init with the head's cache in format `kv` (the engine's --kv-cache).
++    /// init with the head's cache in format `kv` (Head.kv).
+     pub fn initFor(kv: Kv, gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, cap: usize, draft_n: usize, rows: usize) !Draft {
+-        var d: Draft = .{ .stream = stream, .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined };
++        var d: Draft = .{ .stream = stream, .gpa = gpa, .kv = kv, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined };
+         d.kc = try cuda.DeviceBuffer.alloc(driver, cap * kv.keyRow());
+         errdefer d.kc.free();
+         d.vc = try cuda.DeviceBuffer.alloc(driver, cap * kv.valueRow());
+@@ -186,7 +188,7 @@ pub const Draft = struct {
+     pub fn initParts(kv: Kv, gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, cap: usize, draft_n: usize, rows: usize, block: cuda.DeviceBuffer) !Draft {
+         const bytes_in = partsBytes(draft_n, rows);
+         if (block.len < bytes_in) return error.FlashNextRunTooShort;
+-        var d: Draft = .{ .stream = stream, .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .spare = undefined, .host = undefined };
++        var d: Draft = .{ .stream = stream, .gpa = gpa, .kv = kv, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .spare = undefined, .host = undefined };
+         d.kc = try cuda.DeviceBuffer.alloc(driver, cap * kv.keyRow());
+         errdefer d.kc.free();
+         d.vc = try cuda.DeviceBuffer.alloc(driver, cap * kv.valueRow());
+@@ -257,7 +259,8 @@ pub const Draft = struct {
+             }
+         };
+         const head = wt.attn_n;
+-        var d: Draft = .{ .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = Carve.page(driver, paged.at(head, .key)), .vc = Carve.page(driver, paged.at(head, .value)), .ikc = Carve.page(driver, paged.at(head, .index)), .pooled = Carve.page(driver, paged.at(head, .pooled)), .pg = paged.pg(), .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined };
++        const kv = paged.head orelse return error.FlashNextRunTooShort; // pages without the head's layer
++        var d: Draft = .{ .gpa = gpa, .kv = kv, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = Carve.page(driver, paged.at(head, .key)), .vc = Carve.page(driver, paged.at(head, .value)), .ikc = Carve.page(driver, paged.at(head, .index)), .pooled = Carve.page(driver, paged.at(head, .pooled)), .pg = paged.pg(), .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined };
+         d.streams = Carve.take(driver, &at, d.rows_cap * wide * 2);
+         d.out = Carve.take(driver, &at, wide * 2);
+         d.logits = Carve.take(driver, &at, max_rows * vocab * 2);
+diff --git a/zig/src/families/flashnext/cuda_mtp_ops.zig b/zig/src/families/flashnext/cuda_mtp_ops.zig
+index 74c7a3f74..977f67f4b 100644
+--- a/zig/src/families/flashnext/cuda_mtp_ops.zig
++++ b/zig/src/families/flashnext/cuda_mtp_ops.zig
+@@ -95,6 +95,23 @@ pub fn Ops(comptime Tri: type) type {
+             return o.e.stream.*;
+         }
+ 
++        /// The launches over the head's own cache: its glue's when that cache's format is not the model's (Head.glue).
++        fn headTri(o: Self) Tri {
++            var t = o.tri;
++            if (o.h.glue) |*g| t.own = g;
++            return t;
++        }
++
++        /// The stream's image rows as the head's cache takes them (their prep kernels in its format).
++        fn headMedia(o: Self, media: ?@import("cuda_media.zig").View) ?@import("cuda_media.zig").View {
++            var v = media orelse return null;
++            if (o.h.glue) |*g| {
++                v.prep = g.f.prep_media;
++                v.prep_paged = g.f.prep_media_paged;
++            }
++            return v;
++        }
++
+         /// Prompt rows [at, stop): the pass with its streams kept, then the head over each row with a known next token.
+         pub fn prefillChunk(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, at: usize, stop: usize) !void {
+             if (stop > d.cap or stop <= at or stop - at > d.rows_cap) return error.PromptTooLong;
+@@ -126,7 +143,7 @@ pub fn Ops(comptime Tri: type) type {
+         /// forwardHead taking at most `piece_max` rows a pass (a prompt chunk's: plan.promptPiece).
+         pub fn forwardHeadPieces(o: Self, d: *Draft, next: []const u32, rows: u64, scores: bool, piece_max: usize) !void {
+             const e = o.e;
+-            const tri = o.tri;
++            const tri = o.headTri();
+             const h = o.h;
+             if (next.len == 0) return;
+             if (d.len + next.len > d.cap) return error.PromptTooLong;
+@@ -144,7 +161,7 @@ pub fn Ops(comptime Tri: type) type {
+                 .k = &e.batch_k,
+                 .s = s,
+                 .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = (&h.layer)[0..1], .mixer = h.mixer, .head = h.draft, .ngram = &e.ngram },
+-                .seq = .{ .media = d.media, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .pg = d.pg, .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows },
++                .seq = .{ .media = o.headMedia(d.media), .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .pg = d.pg, .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows },
+                 .hooks = .{ .logits = .none },
+             };
+             var at: usize = 0;
+@@ -283,7 +300,7 @@ pub fn Ops(comptime Tri: type) type {
+         /// One group of lanes' rows in one pass: the head's rows beside the others', each lane's last row its own.
+         fn headGroup(o: Self, group: Group, s: *batch.Scratch, score_rows: u64) !void {
+             const e = o.e;
+-            const tri = o.tri;
++            const tri = o.headTri();
+             const h = o.h;
+             const ds = group.ds;
+             const nexts = group.nexts;
+diff --git a/zig/src/families/flashnext/cuda_pages.zig b/zig/src/families/flashnext/cuda_pages.zig
+index 48e1512fa..17f2ec4a9 100644
+--- a/zig/src/families/flashnext/cuda_pages.zig
++++ b/zig/src/families/flashnext/cuda_pages.zig
+@@ -33,18 +33,22 @@ pub fn layerBytes(kv: Kv, tokens: usize) usize {
+ 
+ /// Bytes a page takes: every attention layer's share.
+ pub fn pageBytes(kv: Kv, tokens: usize) usize {
+-    return pageBytesOf(kv, tokens, wt.attn_n);
++    return pageBytesOf(kv, tokens, null);
+ }
+ 
+-/// Bytes a page of `layers` attention layers takes (the model's, and the MTP head's cache when it drafts).
+-pub fn pageBytesOf(kv: Kv, tokens: usize, layers: usize) usize {
+-    return layers * layerBytes(kv, tokens);
++/// Bytes a page takes with the MTP head's cache after the model's layers when it drafts, its share in format `head`.
++pub fn pageBytesOf(kv: Kv, tokens: usize, head: ?Kv) usize {
++    return wt.attn_n * layerBytes(kv, tokens) + if (head) |h| layerBytes(h, tokens) else 0;
+ }
+ 
+ /// Where `part` of attention layer `layer` starts inside a page.
+ pub fn offset(kv: Kv, tokens: usize, layer: usize, part: Part) usize {
+-    const at = layer * layerBytes(kv, tokens);
+-    return at + switch (part) {
++    return layer * layerBytes(kv, tokens) + partAt(kv, tokens, part);
++}
++
++/// Where `part` starts inside one layer's share of a page.
++fn partAt(kv: Kv, tokens: usize, part: Part) usize {
++    return switch (part) {
+         .key => 0,
+         .value => tokens * kv.keyRow(),
+         .index => tokens * kv.kvRow(),
+@@ -93,25 +97,30 @@ pub const Paged = struct {
+     own_ids: bool = true,
+     /// The page test's own arena.
+     arena: ?cuda.DeviceBuffer = null,
+-    /// Attention layers a page holds: the model's, and the MTP head's after them in a pool's pages.
+-    layers: usize = wt.attn_n,
+-    /// The format of its key and value rows (the engine's --kv-cache).
++    /// The format of the model's key and value rows (the engine's --kv-cache).
+     kv: Kv = .bf16,
++    /// In a pool's pages, the MTP head's cache after the model's layers (layer attn_n), its rows in this format (Head.kv).
++    head: ?Kv = null,
+     stream: ?cuda.Stream = null,
+ 
+     pub fn pg(p: *const Paged) Pg {
+-        return .{ .pt = p.table.ptr, .ps = @intCast(pageBytesOf(p.kv, p.tokens, p.layers) / 2), .ptok = @intCast(p.tokens) };
++        return .{ .pt = p.table.ptr, .ps = @intCast(pageBytesOf(p.kv, p.tokens, p.head) / 2), .ptok = @intCast(p.tokens) };
++    }
++
++    /// The format of attention layer `layer`'s rows: the model's, or the head's for the layer after them.
++    pub fn format(p: *const Paged, layer: usize) Kv {
++        return if (layer == wt.attn_n) p.head.? else p.kv;
+     }
+ 
+     /// `part` of attention layer `layer` in page 0: the cache pointer a kernel takes beside pg().
+     pub fn at(p: *const Paged, layer: usize, part: Part) u64 {
+-        return p.base + offset(p.kv, p.tokens, layer, part);
++        return p.base + layer * layerBytes(p.kv, p.tokens) + partAt(p.format(layer), p.tokens, part);
+     }
+ 
+     /// Byte address of row `row` of `part` of `layer` (a position, or a block for pooled).
+     pub fn rowAt(p: *const Paged, layer: usize, part: Part, row: usize) u64 {
+         const per = rows(part, p.tokens);
+-        return p.base + @as(u64, p.ids[row / per]) * pageBytesOf(p.kv, p.tokens, p.layers) + offset(p.kv, p.tokens, layer, part) + (row % per) * rowBytes(p.kv, part);
++        return p.at(layer, part) + @as(u64, p.ids[row / per]) * pageBytesOf(p.kv, p.tokens, p.head) + (row % per) * rowBytes(p.format(layer), part);
+     }
+ 
+     /// Borrowed views of each attention layer's `part` in page 0 (what kc, vc, ikc and pooled hold when paged).
+@@ -178,6 +187,25 @@ test "fp8 pages: 544-byte key rows then 512-byte value rows a position, the inde
+     try std.testing.expectEqual(@as(usize, 0), pageBytes(.fp8, t) % 16);
+ }
+ 
++test "a pool's page with the MTP head's cache in bf16 after twelve fp8 layers: its share and rows in bf16" {
++    const t = 16;
++    var ids = [_]u32{ 1, 0 };
++    const p: Paged = .{ .base = 0, .table = .{ .d = undefined, .ptr = 0x100, .len = 0, .borrowed = true }, .ids = &ids, .tokens = t, .kv = .fp8, .head = .bf16 };
++    const page = pageBytesOf(.fp8, t, .bf16);
++    try std.testing.expectEqual(pageBytes(.fp8, t) + layerBytes(.bf16, t), page);
++    try std.testing.expectEqual(@as(i64, @intCast(page / 2)), p.pg().ps);
++    // the model's layers as on a page without the head
++    try std.testing.expectEqual(page + offset(.fp8, t, 5, .value) + 3 * 512, p.rowAt(5, .value, 3));
++    // the head's: after the model's, 1,024-byte key and value rows
++    const head = wt.attn_n * layerBytes(.fp8, t);
++    try std.testing.expectEqual(head, p.at(wt.attn_n, .key));
++    try std.testing.expectEqual(head + t * 1024, p.at(wt.attn_n, .value));
++    try std.testing.expectEqual(head + t * 2048, p.at(wt.attn_n, .index));
++    try std.testing.expectEqual(page + head + t * 1024 + 3 * 1024, p.rowAt(wt.attn_n, .value, 3));
++    try std.testing.expectEqual(head + t * (2048 + index_row) + index_row, p.rowAt(wt.attn_n, .pooled, 5));
++    try std.testing.expectEqual(page, head + layerBytes(.bf16, t));
++}
++
+ test {
+     _ = @import("cuda_page_test_safety.zig");
+ }
+diff --git a/zig/src/families/flashnext/cuda_paging_snap_test.zig b/zig/src/families/flashnext/cuda_paging_snap_test.zig
+index 1398f0ad0..06f7e5df6 100644
+--- a/zig/src/families/flashnext/cuda_paging_snap_test.zig
++++ b/zig/src/families/flashnext/cuda_paging_snap_test.zig
+@@ -5,6 +5,7 @@ const pages = @import("cuda_pages.zig");
+ const prompt = @import("cuda_prompt.zig");
+ const wt = @import("cuda_prompt_wt.zig");
+ const snap = @import("cuda_snap.zig");
++const Kv = @import("cuda_kv.zig").Kv;
+ 
+ const Fake = struct {
+     var copies: [512][3]u64 = @splat(.{ 0, 0, 0 });
+@@ -57,6 +58,7 @@ const Fixture = struct {
+     states: [wt.linear_n]cuda.DeviceBuffer,
+     kv: [4][wt.attn_n]cuda.DeviceBuffer,
+     ids: [4]u32 = .{ 7, 2, 11, 0 },
++    format: Kv,
+     fn init(f: *Fixture, d: *const cuda.Driver) void {
+         for (&f.conv, &f.states, 0..) |*cv, *st, i| {
+             cv.* = .{ .d = d, .ptr = 0x10000 + i * 0x1000, .len = 0, .borrowed = true };
+@@ -68,10 +70,10 @@ const Fixture = struct {
+         };
+     }
+     fn paged(f: *Fixture, d: *const cuda.Driver) pages.Paged {
+-        return .{ .base = 0x4000_0000, .table = .{ .d = d, .ptr = 0x5000, .len = 0, .borrowed = true }, .ids = &f.ids, .tokens = 64, .own_ids = false };
++        return .{ .base = 0x4000_0000, .table = .{ .d = d, .ptr = 0x5000, .len = 0, .borrowed = true }, .ids = &f.ids, .tokens = 64, .own_ids = false, .kv = f.format };
+     }
+     fn seq(f: *Fixture, d: *const cuda.Driver) prompt.Seq {
+-        return .{ .conv = &f.conv, .state = &f.states, .kc = &f.kv[0], .vc = &f.kv[1], .ikc = &f.kv[2], .pooled = &f.kv[3], .paged = f.paged(d), .tail = .{ .d = d, .ptr = 0x9000_0000, .len = 0, .borrowed = true }, .history = .{ 5, 9 }, .fed = 150, .logits = &.{}, .cap = 200 };
++        return .{ .conv = &f.conv, .state = &f.states, .kc = &f.kv[0], .vc = &f.kv[1], .ikc = &f.kv[2], .pooled = &f.kv[3], .paged = f.paged(d), .tail = .{ .d = d, .ptr = 0x9000_0000, .len = 0, .borrowed = true }, .history = .{ 5, 9 }, .fed = 150, .logits = &.{}, .cap = 200, .kv = f.format };
+     }
+ };
+ 
+@@ -80,6 +82,7 @@ test "paged snapshots: save and restore keep contiguous order across partial shu
+     const stream: cuda.Stream = .{ .d = &d, .handle = null };
+     var f: Fixture = undefined;
+     f.ids = .{ 7, 2, 11, 0 };
++    f.format = .bf16;
+     f.init(&d);
+     var seq = f.seq(&d);
+     const kept = try snap.save(std.testing.allocator, &d, stream, &seq, null);
+@@ -91,7 +94,7 @@ test "paged snapshots: save and restore keep contiguous order across partial shu
+         try std.testing.expectEqual(kept.buf.ptr + off, copy[0]);
+         off += copy[2];
+     }
+-    try std.testing.expectEqual(@as(u64, snap.bytes(.bf16, 150, false)), off);
++    try std.testing.expectEqual(@as(u64, snap.bytes(.bf16, 150, null)), off);
+     const p = f.paged(&d);
+     var i: usize = 2 * wt.linear_n;
+     for (std.enums.values(pages.Part)) |part| for (0..wt.attn_n) |layer| {
+@@ -124,6 +127,7 @@ test "paged snapshots: a failed copy drains before freeing the snapshot destinat
+     const stream: cuda.Stream = .{ .d = &d, .handle = null };
+     var f: Fixture = undefined;
+     f.ids = .{ 7, 2, 11, 0 };
++    f.format = .bf16;
+     f.init(&d);
+     var seq = f.seq(&d);
+     Fake.fail_copy = 5;
+@@ -137,6 +141,7 @@ test "paged snapshots: drop requires context proof when its stream wait fails" {
+     const stream: cuda.Stream = .{ .d = &d, .handle = null };
+     var f: Fixture = undefined;
+     f.ids = .{ 7, 2, 11, 0 };
++    f.format = .bf16;
+     f.init(&d);
+     var seq = f.seq(&d);
+     const kept = try snap.save(std.testing.allocator, &d, stream, &seq, null);
+@@ -147,18 +152,28 @@ test "paged snapshots: drop requires context proof when its stream wait fails" {
+ }
+ 
+ test "paged snapshots: the pooled MTP head occupies the thirteenth layer with the same logical byte order" {
++    // the head's rows in bf16 beside bf16 or fp8 layers, and in fp8 beside fp8 (TF_FLASHNEXT_HEAD_KV=fp8)
++    for ([_][2]Kv{ .{ .bf16, .bf16 }, .{ .fp8, .bf16 }, .{ .fp8, .fp8 } }) |kvs| try pooledHead(kvs[0], kvs[1]);
++}
++
++fn pooledHead(kv: Kv, head_kv: Kv) !void {
+     var d = Fake.driver();
+     const stream: cuda.Stream = .{ .d = &d, .handle = null };
+     var f: Fixture = undefined;
+     f.ids = .{ 7, 2, 11, 0 };
++    f.format = kv;
+     f.init(&d);
+     var seq = f.seq(&d);
+     var p = f.paged(&d);
+-    p.layers = wt.attn_n + 1;
++    p.head = head_kv;
+     seq.paged = p;
+     const Draft = @import("cuda_mtp_draft.zig").Draft;
+     var head = try Draft.initIn(std.testing.allocator, &d, 200, 8, 16, &p, 0xa000_0000, Draft.runBytes(8, 16));
+     defer head.deinit();
++    try std.testing.expectEqual(head_kv, head.kv);
++    // the head's layer starts after the model's twelve, its parts at its own rows' offsets
++    try std.testing.expectEqual(p.base + wt.attn_n * pages.layerBytes(kv, 64) + 64 * head_kv.keyRow(), head.vc.ptr);
++    try std.testing.expectEqual(@as(i64, @intCast(pages.pageBytesOf(kv, 64, head_kv) / 2)), head.pg.ps);
+     head.len = seq.fed;
+     const kept = try snap.save(std.testing.allocator, &d, stream, &seq, &head);
+     defer snap.drop(std.testing.allocator, stream, kept);
+@@ -177,7 +192,7 @@ test "paged snapshots: the pooled MTP head occupies the thirteenth layer with th
+         while (row < count) : (i += 1) {
+             const take = @min(per, count - row);
+             try std.testing.expectEqual(p.rowAt(wt.attn_n, part, row), saved[i][1]);
+-            try std.testing.expectEqual(take * pages.rowBytes(.bf16, part), saved[i][2]);
++            try std.testing.expectEqual(take * pages.rowBytes(head_kv, part), saved[i][2]);
+             row += take;
+         }
+     }
+@@ -187,7 +202,7 @@ test "paged snapshots: the pooled MTP head occupies the thirteenth layer with th
+         try std.testing.expectEqual(kept.buf.ptr + off, copy[0]);
+         off += copy[2];
+     }
+-    try std.testing.expectEqual(@as(u64, snap.bytes(.bf16, 150, true)), off);
++    try std.testing.expectEqual(@as(u64, snap.bytes(kv, 150, head_kv)), off);
+     Fake.n = 0;
+     seq.fed = 0;
+     try snap.restore(stream, &seq, &head, kept);
+diff --git a/zig/src/families/flashnext/cuda_snap.zig b/zig/src/families/flashnext/cuda_snap.zig
+index e66db3c74..c6014d0c4 100644
+--- a/zig/src/families/flashnext/cuda_snap.zig
++++ b/zig/src/families/flashnext/cuda_snap.zig
+@@ -22,9 +22,11 @@ fn attnBytes(kv: Kv, at: usize) usize {
+     return at * kv.position() + at / wt.index_ratio * index_row;
+ }
+ 
+-/// Device bytes a state after `at` tokens takes: the DeltaNet's are fixed, each attention cache grows by the token.
+-pub fn bytes(kv: Kv, at: usize, head: bool) usize {
+-    return wt.linear_n * (conv_bytes + state_bytes) + (wt.attn_n + @intFromBool(head)) * attnBytes(kv, at) + tail_bytes;
++/// Device bytes a state after `at` tokens takes: the DeltaNet's are fixed, each attention cache grows by the token;
++/// `head`: with the MTP head's cache in that format.
++pub fn bytes(kv: Kv, at: usize, head: ?Kv) usize {
++    const head_bytes = if (head) |h| attnBytes(h, at) else 0;
++    return wt.linear_n * (conv_bytes + state_bytes) + wt.attn_n * attnBytes(kv, at) + head_bytes + tail_bytes;
+ }
+ 
+ /// One kept state; `head`: it holds the MTP head's cache over the same rows, which a drafting stream needs.
+@@ -42,14 +44,14 @@ const Way = enum { save, restore };
+ pub const Piece = struct { layers: usize, n: usize, row: usize = 0, per: usize = 1 };
+ 
+ /// `move`'s pieces in its order at `at` (the disk image names the same): DeltaNet, attention, PLE tail, `head`'s four.
+-pub fn order(kv: Kv, at: usize, head: bool) struct { p: [11]Piece, len: usize } {
++pub fn order(kv: Kv, at: usize, head: ?Kv) struct { p: [11]Piece, len: usize } {
+     var o: [11]Piece = undefined;
+     o[0] = .{ .layers = wt.linear_n, .n = conv_bytes };
+     o[1] = .{ .layers = wt.linear_n, .n = state_bytes };
+     o[2..6].* = attnOrder(kv, wt.attn_n, at);
+     o[6] = .{ .layers = 1, .n = tail_bytes };
+-    if (head) o[7..11].* = attnOrder(kv, 1, at);
+-    return .{ .p = o, .len = if (head) 11 else 7 };
++    if (head) |h| o[7..11].* = attnOrder(h, 1, at);
++    return .{ .p = o, .len = if (head != null) 11 else 7 };
+ }
+ 
+ /// An attention cache's pieces for `at` rows: complete pooled blocks only (the rest pool again as later rows land).
+@@ -66,7 +68,8 @@ fn attnOrder(kv: Kv, layers: usize, at: usize) [4]Piece {
+ fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize, way: Way) !void {
+     const dr = stream.d;
+     var off: u64 = 0;
+-    const o = order(seq.kv, at, d != null);
++    const head_kv: ?Kv = if (d) |h| h.kv else null;
++    const o = order(seq.kv, at, head_kv);
+     var bufs: [11][]cuda.DeviceBuffer = undefined;
+     bufs[0..7].* = .{ seq.conv, seq.state, seq.kc, seq.vc, seq.ikc, seq.pooled, (&seq.tail)[0..1] };
+     if (d) |h| bufs[7..11].* = .{ (&h.kc)[0..1], (&h.vc)[0..1], (&h.ikc)[0..1], (&h.pooled)[0..1] };
+@@ -80,7 +83,7 @@ fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize,
+                 // the same bytes in the same order as a contiguous cache's, a run a page
+                 const part: pages.Part = @fromBackingInt(@intCast(if (head) pi - 7 else pi - 2));
+                 const at_layer = if (head) wt.attn_n else layer;
+-                const row = pages.rowBytes(pg.kv, part);
++                const row = pages.rowBytes(pg.format(at_layer), part);
+                 if (row != p.row) return error.SnapShape;
+                 const per = pages.rows(part, pg.tokens);
+                 const n = p.n / row;
+@@ -100,7 +103,7 @@ fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize,
+             off += p.n;
+         }
+     }
+-    std.debug.assert(off == bytes(seq.kv, at, d != null));
++    std.debug.assert(off == bytes(seq.kv, at, head_kv));
+ }
+ 
+ /// A copy of `seq` (and of the head's cache, with `d`) as it stands after `seq.fed` tokens.
+@@ -109,7 +112,7 @@ pub fn save(gpa: std.mem.Allocator, driver: *const cuda.Driver, stream: cuda.Str
+     if (d) |h| if (h.len != at or h.drafted != 0) return error.NotAtMark;
+     const snap = try gpa.create(Snap);
+     errdefer gpa.destroy(snap);
+-    snap.* = .{ .buf = try cuda.DeviceBuffer.alloc(driver, bytes(seq.kv, at, d != null)), .at = at, .history = seq.history, .head = d != null };
++    snap.* = .{ .buf = try cuda.DeviceBuffer.alloc(driver, bytes(seq.kv, at, if (d) |h| h.kv else null)), .at = at, .history = seq.history, .head = d != null };
+     errdefer snap.buf.free();
+     errdefer cuda.completion.drain(driver, stream, "a failed snapshot save did not drain");
+     try move(stream, seq, d, snap.buf.ptr, at, .save);
+@@ -139,27 +142,42 @@ pub fn drop(gpa: std.mem.Allocator, stream: cuda.Stream, snap: *Snap) void {
+ }
+ 
+ test "a state's bytes: about 110 MiB of DeltaNet states and the n-gram tail, then 27 KiB a token" {
+-    try std.testing.expectEqual(@as(usize, 12 * (2 * 2 * 256 * 2 + 128 * 2)), bytes(.bf16, 1, false) - bytes(.bf16, 0, false));
++    try std.testing.expectEqual(@as(usize, 12 * (2 * 2 * 256 * 2 + 128 * 2)), bytes(.bf16, 1, null) - bytes(.bf16, 0, null));
+     // a complete block of 4 adds its pooled row
+-    try std.testing.expectEqual(@as(usize, 12 * (4 * (2 * 2 * 256 * 2 + 128 * 2) + 128 * 2)), bytes(.bf16, 4, false) - bytes(.bf16, 0, false));
++    try std.testing.expectEqual(@as(usize, 12 * (4 * (2 * 2 * 256 * 2 + 128 * 2) + 128 * 2)), bytes(.bf16, 4, null) - bytes(.bf16, 0, null));
+     // the head's cache is one more attention layer's rows
+-    try std.testing.expectEqual(@as(usize, 13 * (2 * 2 * 256 * 2 + 128 * 2)), bytes(.bf16, 1, true) - bytes(.bf16, 0, true));
+-    try std.testing.expect(bytes(.bf16, 0, false) > 100 << 20 and bytes(.bf16, 0, false) < 120 << 20);
++    try std.testing.expectEqual(@as(usize, 13 * (2 * 2 * 256 * 2 + 128 * 2)), bytes(.bf16, 1, .bf16) - bytes(.bf16, 0, .bf16));
++    try std.testing.expect(bytes(.bf16, 0, null) > 100 << 20 and bytes(.bf16, 0, null) < 120 << 20);
+ }
+ 
+ test "an fp8 state's bytes: the DeltaNet's and the n-gram tail as in bf16, then 1,056 + 256 bytes a layer and token" {
+     const per_layer = 1056 + 128 * 2;
+-    try std.testing.expectEqual(@as(usize, 12 * per_layer), bytes(.fp8, 1, false) - bytes(.fp8, 0, false));
+-    try std.testing.expectEqual(@as(usize, 12 * (4 * per_layer + 128 * 2)), bytes(.fp8, 4, false) - bytes(.fp8, 0, false));
+-    try std.testing.expectEqual(@as(usize, 13 * per_layer), bytes(.fp8, 1, true) - bytes(.fp8, 0, true));
+-    try std.testing.expectEqual(bytes(.bf16, 0, false), bytes(.fp8, 0, false));
++    try std.testing.expectEqual(@as(usize, 12 * per_layer), bytes(.fp8, 1, null) - bytes(.fp8, 0, null));
++    try std.testing.expectEqual(@as(usize, 12 * (4 * per_layer + 128 * 2)), bytes(.fp8, 4, null) - bytes(.fp8, 0, null));
++    try std.testing.expectEqual(@as(usize, 13 * per_layer), bytes(.fp8, 1, .fp8) - bytes(.fp8, 0, .fp8));
++    try std.testing.expectEqual(bytes(.bf16, 0, null), bytes(.fp8, 0, null));
+     for ([_]usize{ 1, 4, 513, 262144 }) |at| {
+         // a state at `at` tokens is smaller by (2,048 - 1,056) bytes a token of each of the 13 layers
+-        try std.testing.expectEqual(at * 13 * (2048 - 1056), bytes(.bf16, at, true) - bytes(.fp8, at, true));
++        try std.testing.expectEqual(at * 13 * (2048 - 1056), bytes(.bf16, at, .bf16) - bytes(.fp8, at, .fp8));
+         var n: usize = 0;
+-        const o = order(.fp8, at, true);
++        const o = order(.fp8, at, .fp8);
+         for (o.p[0..o.len]) |p| n += p.layers * p.n;
+-        try std.testing.expectEqual(bytes(.fp8, at, true), n);
++        try std.testing.expectEqual(bytes(.fp8, at, .fp8), n);
++    }
++}
++
++test "a state with the head's cache in bf16 beside fp8 layers: 2,048 + 256 bytes a token for the head, 1,056 + 256 for each layer" {
++    for ([_]usize{ 0, 1, 4, 513, 262144 }) |at| {
++        try std.testing.expectEqual(at * (2048 - 1056), bytes(.fp8, at, .bf16) - bytes(.fp8, at, .fp8));
++        try std.testing.expectEqual(bytes(.fp8, at, null) + bytes(.bf16, at, .bf16) - bytes(.bf16, at, null), bytes(.fp8, at, .bf16));
++        var n: usize = 0;
++        const o = order(.fp8, at, .bf16);
++        for (o.p[0..o.len]) |p| n += p.layers * p.n;
++        try std.testing.expectEqual(bytes(.fp8, at, .bf16), n);
++        // the head's key and value rows are bf16's, the layers' fp8's
++        try std.testing.expectEqual(Kv.bf16.keyRow(), o.p[7].row);
++        try std.testing.expectEqual(Kv.bf16.valueRow(), o.p[8].row);
++        try std.testing.expectEqual(Kv.fp8.keyRow(), o.p[2].row);
+     }
+ }
+ 
+diff --git a/zig/src/native/cuda_flashnext_kv8_test.zig b/zig/src/native/cuda_flashnext_kv8_test.zig
+index a596ca3ec..7d6ed0c84 100644
+--- a/zig/src/native/cuda_flashnext_kv8_test.zig
++++ b/zig/src/native/cuda_flashnext_kv8_test.zig
+@@ -19,7 +19,12 @@ fn room(gib: f64) u64 {
+ 
+ /// A drafting stream's device bytes at the window, as cuda_lanes_load.zig counts them: its sequence and its head's.
+ fn streamBytes(kv: Kv) u64 {
+-    return flashnext.prompt.seqBytesFor(kv, window) + flashnext.mtp.Draft.bytes(kv, window, draft_ids, chunk);
++    return streamBytesWith(kv, kv);
++}
++
++/// streamBytes with the head's cache in format `head` (cuda_kv.zig headFor).
++fn streamBytesWith(kv: Kv, head: Kv) u64 {
++    return flashnext.prompt.seqBytesFor(kv, window) + flashnext.mtp.Draft.bytes(head, window, draft_ids, chunk);
+ }
+ 
+ test "Flash Next takes --kv-cache fp8 at family admission and its options carry the flag" {
+@@ -56,8 +61,19 @@ test "the Spark's 24.36 GiB of sequence memory admits five full-window streams i
+ test "the prompt cache keeps about 1.6 times the states in fp8" {
+     // 16 GiB of kept states of 32,768 tokens, each with the head's rows
+     const at = 32768;
+-    const bf = flashnext.snap.bytes(.bf16, at, true);
+-    const f8 = flashnext.snap.bytes(.fp8, at, true);
++    const bf = flashnext.snap.bytes(.bf16, at, .bf16);
++    const f8 = flashnext.snap.bytes(.fp8, at, .fp8);
+     try std.testing.expectEqual(@as(usize, 13 * at * (2048 - 1056)), bf - f8);
+     try std.testing.expect(16 * GiB / f8 * 10 >= 16 * GiB / bf * 15);
+ }
++
++test "the MTP head's cache in bf16 beside fp8 layers: 248 MiB more a full-window stream, five fit the pool v1.2.2 leaves" {
++    const f8 = streamBytes(.fp8);
++    const mixed = streamBytesWith(.fp8, .bf16);
++    try std.testing.expectEqual(@as(u64, window * (2048 - 1056)), mixed - f8);
++    // the pool the FP4 checkpoint leaves (README: 27.3 to 29.0 GiB on three starts, 27.22 in a refusal): five full windows
++    try std.testing.expectEqual(@as(u32, 5), try memory.admit(room(27.22), mixed, 0, 5, true));
++    // v1.1.4's 24.36 GiB holds four with the head in bf16; TF_FLASHNEXT_HEAD_KV=fp8 keeps five there
++    try std.testing.expectEqual(@as(u32, 4), try memory.admit(room(24.36), mixed, 0, 16, false));
++    try std.testing.expectEqual(@as(u32, 5), try memory.admit(room(24.36), streamBytesWith(.fp8, try flashnext.prompt.kv_format.headFor(.fp8, "fp8")), 0, 5, true));
++}
+diff --git a/zig/tests/cuda/flashnext_kv8_tests.zig b/zig/tests/cuda/flashnext_kv8_tests.zig
+index 7a503d28c..1855829fb 100644
+--- a/zig/tests/cuda/flashnext_kv8_tests.zig
++++ b/zig/tests/cuda/flashnext_kv8_tests.zig
+@@ -319,6 +319,128 @@ fn lanes(r: *Rig, g: Glues, c: Cache) !void {
+     try r.sameRows("fp8 lanes attention", u16, got, try r.back(u16, want, rows * q_heads * head_dim));
+ }
+ 
++/// The MTP head's glue beside fp8 layers (Glue.withKv(.bf16): its own cache bf16): every cache launch it takes writes and reads
++/// the bf16 glue's bytes, contiguous, paged and one-launch lanes, decode rows through the read-ahead kernel as a bf16 engine's.
++fn head(r: *Rig, b: *const flash.Glue, h: *const flash.Glue, pages: Pages, c: Cache) !void {
++    try check.expect(h.kv == .bf16, "the head's glue launches the bf16 cache kernels", .{});
++    const glues = [2]*const flash.Glue{ b, h };
++    const kv_b = kv_heads * head_dim * 2;
++    const pb = ptok * (2 * kv_b + index_dim * 2) + ptok / 4 * index_dim * 2;
++    const pg: flash.Pg = .{ .pt = pages.table, .ps = pb / 2, .ptok = ptok };
++    const at = struct {
++        fn of(p: Pages, page: usize, pos: usize, part: usize) usize {
++            return @as(usize, @intCast(p.ids[pos / ptok])) * page + part + pos % ptok * kv_b;
++        }
++    }.of;
++
++    // the write, contiguous and paged
++    const rows = 17;
++    const pos0 = 700;
++    const dp = try r.dev(std.mem.sliceAsBytes(r.bfs(rows * proj_n, 2)));
++    const dpos = try r.dev(std.mem.sliceAsBytes(&[_]i32{ pos0, 0, 0, 0 }));
++    const dqw = try r.dev(std.mem.sliceAsBytes(r.f32s(head_dim, 0.5, 1.5)));
++    const dkw = try r.dev(std.mem.sliceAsBytes(r.f32s(head_dim, 0.5, 1.5)));
++    const diw = try r.dev(std.mem.sliceAsBytes(r.f32s(index_dim, 0.5, 1.5)));
++    const dinv = try r.dev(std.mem.sliceAsBytes(try inverse(r)));
++    var w: [2][6]u64 = undefined; // [glue][q, iq, k, v, indexer k, paged arena]
++    for (glues, &w) |g, *o| {
++        o.* = .{ try r.out(rows * q_heads * head_dim * 2), try r.out(rows * index_heads * index_dim * 2), try r.out(cap * kv_b), try r.out(cap * kv_b), try r.out(cap * index_dim * 2), try r.out(pages.ids.len * pb) };
++        try g.attnPrep(r.s, dp, dpos, dqw, dkw, diw, dinv, o[0], o[2], o[3], o[1], o[4], eps, rows, .{});
++        const q_p = try r.out(rows * q_heads * head_dim * 2);
++        const iq_p = try r.out(rows * index_heads * index_dim * 2);
++        try g.attnPrep(r.s, dp, dpos, dqw, dkw, diw, dinv, q_p, o[5], o[5] + ptok * kv_b, iq_p, o[5] + ptok * 2 * kv_b, eps, rows, pg);
++    }
++    for ([_][]const u8{ "head prep queries", "head prep indexer queries", "head prep key rows", "head prep value rows", "head prep indexer keys", "head paged prep" }, [_]usize{ rows * q_heads * head_dim * 2, rows * index_heads * index_dim * 2, cap * kv_b, cap * kv_b, cap * index_dim * 2, pages.ids.len * pb }, 0..) |what, n, i|
++        try r.sameRows(what, u8, w[1][i], try r.back(u8, w[0][i], n));
++
++    // the reads over bf16 rows: chunks and merge at 1, 3 and 20 rows (read ahead up to 16), fused, dense and sparse, then paged
++    const host = try r.a.alloc(u8, pages.ids.len * pb);
++    @memset(host, 0xff);
++    const kb = std.mem.sliceAsBytes(c.kcd);
++    const vb = std.mem.sliceAsBytes(c.vcd);
++    for (0..cap) |pos| {
++        @memcpy(host[at(pages, pb, pos, 0)..][0..kv_b], kb[pos * kv_b ..][0..kv_b]);
++        @memcpy(host[at(pages, pb, pos, ptok * kv_b)..][0..kv_b], vb[pos * kv_b ..][0..kv_b]);
++    }
++    const arena = try r.dev(host);
++    const dkc = try r.dev(kb);
++    const dvc = try r.dev(vb);
++    for ([_]bool{ false, true }) |sparse| {
++        const counts = [_]usize{ 1, 3, 20 };
++        const most = counts[counts.len - 1];
++        const p0: usize = if (sparse) 2600 else 1100;
++        const dq = try r.dev(std.mem.sliceAsBytes(r.bfs(most * q_heads * head_dim, 1)));
++        const sel = try rowsOf(r, p0, most, sparse);
++        const dp0 = try r.dev(std.mem.sliceAsBytes(&[_]i32{ @intCast(p0), 0, 0, 0 }));
++        const po = try r.out(most * nch * q_heads * head_dim * 4);
++        const pm = try r.out(most * nch * q_heads * 4);
++        const pl = try r.out(most * nch * q_heads * 4);
++        for (counts) |m| for ([_]flash.Pg{ .{}, pg }) |p| {
++            const chunks = if (sparse) (idw + 511) / 512 else (p0 + m + 511) / 512;
++            const kc, const vc = if (p.pt != 0) .{ arena, arena + ptok * kv_b } else .{ dkc, dvc };
++            var got: [2]u64 = undefined;
++            for (glues, &got) |g, *o| {
++                o.* = try r.out(m * q_heads * head_dim * 2);
++                try g.attnChunks(r.s, dq, kc, vc, dp0, po, pm, pl, sel.ids, sel.nk, sel.spr, m, kv_heads, chunks, true, p);
++                try g.attnMerge(r.s, po, pm, pl, dp0, o.*, sel.nk, sel.spr, m, kv_heads, true);
++            }
++            try r.sameRows(if (p.pt != 0) "head paged attention" else "head attention", u16, got[1], try r.back(u16, got[0], m * q_heads * head_dim));
++        };
++        for ([_]flash.Pg{ .{}, pg }) |p| {
++            const kc, const vc = if (p.pt != 0) .{ arena, arena + ptok * kv_b } else .{ dkc, dvc };
++            var got: [2]u64 = undefined;
++            for (glues, &got) |g, *o| {
++                o.* = try r.out(most * q_heads * head_dim * 2);
++                try g.attnFused(r.s, dq, kc, vc, dp0, o.*, sel.ids, sel.nk, sel.spr, most, kv_heads, p);
++            }
++            try r.sameRows(if (p.pt != 0) "head paged attention fused" else "head attention fused", u16, got[1], try r.back(u16, got[0], most * q_heads * head_dim));
++        }
++    }
++
++    // a shared round's two lanes in one launch a kernel: the same rows and outputs through either glue
++    const lane_pos = [2]usize{ 1100, 2600 };
++    const lane_rows = [2]usize{ 3, 5 };
++    const lr = lane_rows[0] + lane_rows[1];
++    const lp = try r.dev(std.mem.sliceAsBytes(r.bfs(lr * proj_n, 2)));
++    const sa = try rowsOf(r, lane_pos[0], lane_rows[0], false);
++    const sb = try rowsOf(r, lane_pos[1], lane_rows[1], true);
++    const ids = try r.out(lr * idw * 4);
++    const nk = try r.out(lr * 4);
++    const spr = try r.out(lr * 4);
++    for ([_]Rows{ sa, sb }, [_]usize{ 0, lane_rows[0] }, lane_rows) |x, row, n| {
++        for ([_][2]u64{ .{ ids, x.ids }, .{ nk, x.nk }, .{ spr, x.spr } }, [_]usize{ idw * 4, 4, 4 }) |pair, wd| {
++            try r.gpu.d.check(r.gpu.d.api.cuMemcpyDtoDAsync_v2(pair[0] + row * wd, pair[1], n * wd, r.s.handle), "cuMemcpyDtoDAsync");
++        }
++    }
++    const po = try r.out(lr * nch * q_heads * head_dim * 4);
++    const pm = try r.out(lr * nch * q_heads * 4);
++    const pl = try r.out(lr * nch * q_heads * 4);
++    var lanes_out: [2][3]u64 = undefined; // [glue][attention, lane 0 keys, lane 1 keys]
++    for (glues, &lanes_out) |g, *o| {
++        var keys: [2]u64 = undefined;
++        const tab = try r.a.alloc(u8, flash.batch_state.lanes_bytes);
++        @memset(tab, 0);
++        var row0: usize = 0;
++        for (0..2) |i| {
++            keys[i] = try r.dev(kb);
++            flash.batch_lanes.putCaches(tab, 0, i, keys[i], try r.dev(vb), try r.out(cap * index_dim * 2), try r.out(cap / 4 * index_dim * 2));
++            flash.batch_lanes.putLane(tab, i, row0, lane_pos[i], lane_rows[i]);
++            row0 += lane_rows[i];
++        }
++        const dtab = try r.dev(tab);
++        const li = dtab + flash.batch_state.lanes_ptrs;
++        const q = try r.out(lr * q_heads * head_dim * 2);
++        const iq = try r.out(lr * index_heads * index_dim * 2);
++        try g.attnPrepLanes(r.s, lp, dtab, li, dqw, dkw, diw, dinv, q, iq, eps, lr);
++        o[0] = try r.out(lr * q_heads * head_dim * 2);
++        try g.attnChunksLanes(r.s, q, dtab, li, po, pm, pl, ids, nk, spr, lr, kv_heads, nch);
++        try g.attnMergeLanes(r.s, po, pm, pl, li, o[0], nk, spr, lr, kv_heads);
++        o[1..3].* = keys;
++    }
++    try r.sameRows("head lanes attention", u16, lanes_out[1][0], try r.back(u16, lanes_out[0][0], lr * q_heads * head_dim));
++    for (1..3) |i| try r.sameRows("head lanes prep key rows", u8, lanes_out[1][i], try r.back(u8, lanes_out[0][i], cap * kv_b));
++}
++
+ pub fn run(gpu: check.Gpu) !void {
+     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
+     defer arena.deinit();
+@@ -336,5 +458,7 @@ pub fn run(gpu: check.Gpu) !void {
+     try attention(&r, g, c, pages, false);
+     try attention(&r, g, c, pages, true);
+     try lanes(&r, g, c);
+-    check.pass("flashnext-kv8: the quantizing write equals the format's model byte for byte; the widening reads equal the bf16 kernels on the dequantized rows, dense and sparse, chunked and fused; paged and one-launch lanes equal the contiguous fp8 launches", .{});
++    const h = try f.withKv(.bf16); // the MTP head's: shares f's modules
++    try head(&r, &b, &h, pages, c);
++    check.pass("flashnext-kv8: the quantizing write equals the format's model byte for byte; the widening reads equal the bf16 kernels on the dequantized rows, dense and sparse, chunked and fused; paged and one-launch lanes equal the contiguous fp8 launches; the MTP head's bf16 glue beside fp8 is the bf16 glue's bytes", .{});
+ }
+diff --git a/zig/tests/cuda/main.zig b/zig/tests/cuda/main.zig
+index 0a4e1ef25..1a24120c4 100644
+--- a/zig/tests/cuda/main.zig
++++ b/zig/tests/cuda/main.zig
+@@ -151,7 +151,7 @@ const usage =
+     \\  flashnext-gdn-lanes       TF_FLASHNEXT_GDN_LANES' three launches against the per-lane loop, every byte (synthetic)
+     \\  hc-fuse                   the fused native hyper-connection read-out and writeback mode 3 against the chains they replace: bytes, then times
+     \\  flashnext-attn            Flash Next's own attention glue, pooling and block scores against float64 (synthetic)
+-    \\  flashnext-kv8             Flash Next's --kv-cache fp8 write against its format model, its reads against the bf16 kernels, paged and lanes (synthetic)
++    \\  flashnext-kv8             Flash Next's --kv-cache fp8 write against its format model, its reads against the bf16 kernels, paged and lanes, the MTP head's bf16 glue beside it (synthetic)
+     \\  flashnext-pages           the attention glue's caches through a page table: paged == contiguous, float64, controls
+     \\  flashnext-cand            Flash Next's sampled-draw candidates (fn_row_cand) against the host reference (synthetic rows, ties, NaN)
+     \\  info                      driver, device and library versions

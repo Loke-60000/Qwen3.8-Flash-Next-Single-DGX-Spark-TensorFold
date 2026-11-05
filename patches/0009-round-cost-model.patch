@@ -1,54 +1,59 @@
 diff --git a/zig/src/core/lanes/allocate.zig b/zig/src/core/lanes/allocate.zig
-index 9c940d9..73c7647 100644
+index c3c592af6..b0599ff7f 100644
 --- a/zig/src/core/lanes/allocate.zig
 +++ b/zig/src/core/lanes/allocate.zig
-@@ -15,6 +15,11 @@ pub const HeadCost = struct {
+@@ -21,6 +21,9 @@ pub const HeadCost = struct {
      step_ms: f64 = 0.0,
      batched: bool = false,
      free_first: bool = false,
-+    /// A3 (a draft row priced apart): above 0, a round's forward is `costs` at its `streams` (their pending rows, one a
-+    /// stream: rows of different streams) plus `row_ms` for every other row it runs (drafts, forced rows: a stream's further
-+    /// rows share its experts and cost less); 0: `costs` at the round's total rows.
++    /// Above 0: the forward is the table at `streams` rows plus row_ms for every further row (forwardMs).
 +    row_ms: f64 = 0.0,
 +    streams: u64 = 0,
  };
  
  /// allocate, each stream's drafts past its first costing one more head step.
-@@ -36,7 +41,8 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
+@@ -42,7 +45,7 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
      var deepest: u32 = 0;
      var firsts: u64 = 0;
      const timed = !costs.empty();
 -    var best = rate(costs, timed, rows, expected, overhead_ms);
-+    const base = if (head.streams > 0) @min(head.streams, rows) else rows;
-+    var best = rateRows(costs, timed, base, rows, expected, overhead_ms, head.row_ms);
++    var best = rate(costs, timed, rows, expected, overhead_ms, head);
      while (rows < max_rows) {
          // the likeliest next node, ties to the lowest stream (Python's heapq of (-p, stream))
          var pick: ?usize = null;
-@@ -57,7 +63,7 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
+@@ -63,7 +66,7 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
          deepest = @max(deepest, counts[s]);
          expected += pick_p;
-         const steps: f64 = @floatFromInt(if (head.batched) deepest else drafts - (if (head.free_first) firsts else 0));
+         const steps: f64 = @floatFromInt(if (head.batched) deepest -| @intFromBool(head.free_first) else drafts - (if (head.free_first) firsts else 0));
 -        const now = rate(costs, timed, rows, expected, overhead_ms + head.step_ms * steps);
-+        const now = rateRows(costs, timed, base, rows, expected, overhead_ms + head.step_ms * steps, head.row_ms);
++        const now = rate(costs, timed, rows, expected, overhead_ms + head.step_ms * steps, head);
          if (now > best or (!timed and head.step_ms == 0)) {
              best = now;
              @memcpy(best_counts, counts);
-@@ -66,6 +72,14 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
+@@ -72,12 +75,20 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
      return best_counts;
  }
  
-+/// rate with the forward priced by streams plus a draft row's ms (row_ms > 0), else by total rows.
-+fn rateRows(costs: *const Table, timed: bool, base: u64, total: u64, expected: f64, overhead_ms: f64, row_ms: f64) f64 {
-+    if (!(row_ms > 0.0)) return rate(costs, timed, total, expected, overhead_ms);
-+    var cost: f64 = 1.0;
-+    if (timed) cost = (costs.get(@intCast(base)) orelse return -1.0) + row_ms * @as(f64, @floatFromInt(total - base));
-+    return expected / (cost + overhead_ms);
+-fn rate(costs: *const Table, timed: bool, total: u64, expected: f64, overhead_ms: f64) f64 {
++fn rate(costs: *const Table, timed: bool, total: u64, expected: f64, overhead_ms: f64, head: HeadCost) f64 {
+     var cost: f64 = 1.0;
+-    if (timed) cost = costs.get(@intCast(total)) orelse return -1.0;
++    if (timed) cost = forwardMs(costs, head.streams, total, head.row_ms) orelse return -1.0;
+     return expected / (cost + overhead_ms);
+ }
+ 
++/// A shared forward's ms: the table at `rows`, or with row_ms the table at `streams` plus row_ms each further row.
++pub fn forwardMs(costs: *const Table, streams: u64, rows: u64, row_ms: f64) ?f64 {
++    // a stream's further rows (drafts, forced rows) share its experts; fewer rows than streams: priced by rows
++    if (!(row_ms > 0.0) or streams == 0 or rows < streams) return costs.get(@intCast(rows));
++    const base = costs.get(@intCast(streams)) orelse return null;
++    return base + row_ms * @as(f64, @floatFromInt(rows - streams));
 +}
 +
- fn rate(costs: *const Table, timed: bool, total: u64, expected: f64, overhead_ms: f64) f64 {
-     var cost: f64 = 1.0;
-     if (timed) cost = costs.get(@intCast(total)) orelse return -1.0;
-@@ -187,6 +201,36 @@ test "a zero draft step prices rounds as allocate does" {
+ /// A chain's nodes' chances from per-depth acceptance (the j-th lands if every earlier one did). Caller frees.
+ pub fn chainProbabilities(gpa: Allocator, rates: []const f64, count: usize) ![]f64 {
+     const out = try gpa.alloc(f64, count);
+@@ -193,6 +204,48 @@ test "a zero draft step prices rounds as allocate does" {
      try std.testing.expectEqualSlices(u32, free, priced);
  }
  
@@ -82,108 +87,69 @@ index 9c940d9..73c7647 100644
 +    try std.testing.expectEqualSlices(u32, &.{ 1, 1 }, mixed);
 +}
 +
++test "a forward priced apart: the table at the streams plus a row's ms past them, else the table at the rows" {
++    const gpa = std.testing.allocator;
++    var t = try extendCosts(gpa, &.{ .{ .width = 1, .ms = 12.0 }, .{ .width = 16, .ms = 42.0 } }, 16);
++    defer t.deinit(gpa);
++    try std.testing.expectEqual(@as(?f64, 28.0), forwardMs(&t, 3, 9, 0.0));
++    try std.testing.expectEqual(@as(?f64, 23.0), forwardMs(&t, 4, 9, 1.0));
++    try std.testing.expectEqual(@as(?f64, 18.0), forwardMs(&t, 4, 4, 1.0));
++    // a round with fewer rows than streams (a stream sat out) is priced at its rows
++    try std.testing.expectEqual(t.get(2), forwardMs(&t, 3, 2, 1.0));
++    try std.testing.expectEqual(@as(?f64, null), forwardMs(&t, 17, 20, 1.0));
++}
++
  test "extendCosts interpolates and extrapolates" {
      const gpa = std.testing.allocator;
      var t = try extendCosts(gpa, &.{ .{ .width = 4, .ms = 8.0 }, .{ .width = 2, .ms = 4.0 } }, 6);
 diff --git a/zig/src/core/lanes/config.zig b/zig/src/core/lanes/config.zig
-index cb2159b..66eda79 100644
+index 7c1f0d7d6..aba1c089e 100644
 --- a/zig/src/core/lanes/config.zig
 +++ b/zig/src/core/lanes/config.zig
-@@ -29,6 +29,7 @@ pub const Model = struct {
+@@ -32,6 +32,7 @@ pub const Model = struct {
      window_costs: []const Cost = &.{}, // forward ms by exact window width (timed at load)
      mtp_step_ms: f64 = 0.0, // one chained head step (timed at load)
      draft_step_ms: f64 = 0.0, // a shared round's draft past a stream's first, as the backend's head runs it (0: priced free)
-+    draft_row_ms: f64 = 0.0, // a shared round's row past one a stream, apart from shared_costs at its streams (0: shared_costs by total rows)
++    draft_row_ms: f64 = 0.0, // a shared round's row past one a stream, beside shared_costs at its streams (0: by total rows)
      streams_exact: bool = true, // shared forwards keep each stream's bits
      hidden_rows: bool = false, // the backend runs several streams' windows in one forward
      batch_rows: u32 = 0, // a shared forward's rows at most (0: 32)
-@@ -87,6 +88,7 @@ pub const Config = struct {
-     lane_costs: Table, // window ms by rows to 64 (lanes/plan_lanes.zig)
-     mtp_step_ms: f64,
-     draft_step_ms: f64 = 0, // Model.draft_step_ms
-+    draft_row_ms: f64 = 0, // Model.draft_row_ms
-     lone_cost_tile: u32 = 0, // Model.lone_cost_tile
-     context_copies: bool = false, // Model.context_copies, within the existing verification width
-     enter_match: i64 = 8, // matching tokens a copy needs (rejects coincidental indentation)
-@@ -159,6 +161,7 @@ pub const Config = struct {
-             .mtp_step_ms = m.mtp_step_ms,
-             .k = .{ .depth_rate = if (m.depth_rate > 0) m.depth_rate else (Constants{}).depth_rate },
+@@ -179,6 +180,7 @@ pub const Config = struct {
+                 .short_slack = if (m.draft_slack > 0) m.draft_slack else (Constants{}).short_slack,
+                 .copy_first = m.copy_first and !m.context_copies,
+                 .hold_costs = m.hold_costs,
++                .draft_row_ms = m.draft_row_ms,
+             },
              .draft_step_ms = m.draft_step_ms,
-+            .draft_row_ms = m.draft_row_ms,
          };
-     }
- 
 diff --git a/zig/src/core/lanes/depth.zig b/zig/src/core/lanes/depth.zig
-index 9f6c711..a7ed0fa 100644
+index a3e5aedb3..f8c179234 100644
 --- a/zig/src/core/lanes/depth.zig
 +++ b/zig/src/core/lanes/depth.zig
-@@ -56,6 +56,7 @@ pub const Rule = struct {
-     shared_costs: *const Table,
-     mtp_step_ms: f64,
-     draft_step_ms: f64 = 0, // a shared round's draft past a stream's first (budgets price it)
-+    draft_row_ms: f64 = 0, // A3: a shared round's row past one a stream, apart from the table at its streams (0: the table at its rows)
-     plain_guard: bool,
-     node_probabilities: bool,
-     confidence_floor: ?f64 = null,
-@@ -299,9 +300,19 @@ pub const Rule = struct {
-         return r.mtp_step_ms * @as(f64, @floatFromInt(steps));
-     }
+@@ -16,6 +16,7 @@ pub const Constants = struct {
+     short_slack: i64 = 0, // granted depths: drafts past a grant that left some of them unverified
+     copy_first: bool = false, // a copy ahead takes the next round whole: the head drafts none for it (else one)
+     hold_costs: []const HoldCost = &.{}, // a drafter's own hold pass by blocks and depth: granted holds must pay for it
++    draft_row_ms: f64 = 0, // Model.draft_row_ms: a shared round's rows past one a stream, beside the table at its streams
+ };
  
-+    /// A shared round's forward at `rows` rows of `streams` streams: the table at the rows, or with draft_row_ms the table at
-+    /// the streams plus draft_row_ms for each row past one a stream (the split allocate prices by). Null: no timed cost.
-+    pub fn forwardMs(r: *const Rule, streams: u32, rows: u64) ?f64 {
-+        if (r.draft_row_ms > 0.0 and rows >= streams) {
-+            const base = r.shared_costs.get(@intCast(streams)) orelse return null;
-+            return base + r.draft_row_ms * @as(f64, @floatFromInt(rows - streams));
-+        }
-+        return r.shared_costs.get(@intCast(rows));
-+    }
-+
+ pub const HoldCost = @import("hold_price.zig").HoldCost;
+@@ -405,7 +406,7 @@ pub const Rule = struct {
+ 
      /// `sampled`: the round drew keyed samples, so it counts for sampled streams' overhead alone; `head_ms` its drafts.
      pub fn observeOverhead(r: *Rule, streams: u32, rows: u64, ms: f64, sampled: bool, head_ms: f64) !void {
 -        const forward = r.shared_costs.get(@intCast(rows)) orelse return;
-+        const forward = r.forwardMs(streams, rows) orelse return;
++        const forward = alloc.forwardMs(r.shared_costs, streams, rows, r.k.draft_row_ms) orelse return;
          const extra = if (ms - forward > 0.0) ms - forward else 0.0;
          const fixed = if (extra - head_ms > 0.0) extra - head_ms else 0.0;
          try r.addOverhead(&r.overhead, streams, fixed, extra - fixed);
-@@ -352,6 +363,29 @@ test "depth picks the most tokens a ms and probes deeper" {
-     try std.testing.expectEqual(@as(i64, 3), try rule.depth(who));
- }
- 
-+test "a round's overhead is measured past the forward priced by streams plus draft rows" {
-+    const gpa = std.testing.allocator;
-+    var shared: Table = .{};
-+    defer shared.deinit(gpa);
-+    for (1..17) |w| try shared.put(gpa, @intCast(w), 10.0 + 2.0 * @as(f64, @floatFromInt(w)));
-+    const empty: Table = .{};
-+    var rule: Rule = .{ .gpa = gpa, .prior = &.{0.9}, .most_drafts = 1, .family_costs = &empty, .shared_costs = &shared, .mtp_step_ms = 0, .plain_guard = false, .node_probabilities = true, .batch_rows = 16 };
-+    defer rule.deinit();
-+    // by rows: 3 streams, 9 rows: the table at 9 is 28 ms, a 31 ms round has 3 ms over
-+    try std.testing.expectEqual(@as(?f64, 28.0), rule.forwardMs(3, 9));
-+    try rule.observeOverhead(3, 9, 31.0, false, 0.0);
-+    try std.testing.expectApproxEqAbs(@as(f64, 3.0), rule.overheadMs(3, false), 1e-12);
-+    // apart, at 4 streams: the table at 4 streams (18 ms) plus 1 ms for each of the 5 other rows, 23 ms, so the same 31 ms round
-+    // has 8 over; the table at the streams alone is the round of only their pending rows
-+    rule.draft_row_ms = 1.0;
-+    try std.testing.expectEqual(@as(?f64, 23.0), rule.forwardMs(4, 9));
-+    try std.testing.expectEqual(@as(?f64, 18.0), rule.forwardMs(4, 4));
-+    try rule.observeOverhead(4, 9, 31.0, false, 0.0);
-+    try std.testing.expectApproxEqAbs(@as(f64, 8.0), rule.overheadMs(4, false), 1e-12);
-+    // a round with fewer rows than streams (a stream sat out) falls back to the table at its rows
-+    try std.testing.expectEqual(@as(?f64, shared.get(2).?), rule.forwardMs(3, 2));
-+}
-+
- test "a shared round's drafts come out the same whichever depths its overhead was measured at" {
-     const gpa = std.testing.allocator;
-     var shared: Table = .{};
 diff --git a/zig/src/core/lanes/draft_row_test.zig b/zig/src/core/lanes/draft_row_test.zig
 new file mode 100644
-index 0000000..c4f2459
+index 000000000..357d78e60
 --- /dev/null
 +++ b/zig/src/core/lanes/draft_row_test.zig
-@@ -0,0 +1,59 @@
-+//! A shared round's draft rows priced apart from its streams' rows (Model.draft_row_ms): the window allocation keeps the drafts
-+//! the table at total rows would cut, and prices as before when the setting is off.
+@@ -0,0 +1,76 @@
++//! A shared round's draft rows priced apart from its streams' rows (Model.draft_row_ms), and off: priced as before.
 +const std = @import("std");
 +const Config = @import("config.zig").Config;
 +const Cost = @import("config.zig").Cost;
@@ -191,6 +157,8 @@ index 0000000..c4f2459
 +const Stream = @import("stream.zig").Stream;
 +const win = @import("windows.zig");
 +const fake = @import("fake.zig");
++const Rule = @import("depth.zig").Rule;
++const Table = @import("table.zig").Table;
 +const t = std.testing;
 +const gpa = t.allocator;
 +
@@ -241,24 +209,28 @@ index 0000000..c4f2459
 +    for (dear) |d| dear_total += d;
 +    try t.expect(dear_total <= rows_total);
 +}
-diff --git a/zig/src/core/lanes/engine.zig b/zig/src/core/lanes/engine.zig
-index a92b27a..3a638f7 100644
---- a/zig/src/core/lanes/engine.zig
-+++ b/zig/src/core/lanes/engine.zig
-@@ -68,6 +68,7 @@ pub const Engine = struct {
-                 .shared_costs = &cfg.shared_costs,
-                 .mtp_step_ms = cfg.mtp_step_ms,
-                 .draft_step_ms = cfg.draft_step_ms,
-+                .draft_row_ms = cfg.draft_row_ms,
-                 .plain_guard = cfg.plain_guard,
-                 .node_probabilities = cfg.node_probabilities,
-                 .confidence_floor = cfg.draft_confidence,
++
++test "a round's overhead is measured past the forward priced by streams plus draft rows" {
++    var shared: Table = .{};
++    defer shared.deinit(gpa);
++    for (1..17) |w| try shared.put(gpa, @intCast(w), 10.0 + 2.0 * @as(f64, @floatFromInt(w)));
++    const empty: Table = .{};
++    var rule: Rule = .{ .gpa = gpa, .prior = &.{0.9}, .most_drafts = 1, .family_costs = &empty, .shared_costs = &shared, .mtp_step_ms = 0, .plain_guard = false, .node_probabilities = true, .batch_rows = 16 };
++    defer rule.deinit();
++    // by rows: 3 streams, 9 rows: the table at 9 is 28 ms, a 31 ms round has 3 ms over
++    try rule.observeOverhead(3, 9, 31.0, false, 0.0);
++    try t.expectApproxEqAbs(@as(f64, 3.0), rule.overheadMs(3, false), 1e-12);
++    // apart, at 4 streams: the table at 4 (18 ms) plus 1 ms for each of the 5 other rows is 23 ms, so 8 ms over
++    rule.k.draft_row_ms = 1.0;
++    try rule.observeOverhead(4, 9, 31.0, false, 0.0);
++    try t.expectApproxEqAbs(@as(f64, 8.0), rule.overheadMs(4, false), 1e-12);
++}
 diff --git a/zig/src/core/lanes/lanes.zig b/zig/src/core/lanes/lanes.zig
-index ff09b58..4883a8f 100644
+index 8588ff423..003fcbcaa 100644
 --- a/zig/src/core/lanes/lanes.zig
 +++ b/zig/src/core/lanes/lanes.zig
-@@ -59,6 +59,7 @@ test {
-     _ = @import("windows_grammar_test.zig");
+@@ -73,6 +73,7 @@ test {
+     _ = @import("grammar_parallel_test.zig");
      _ = @import("pricing_test.zig");
      _ = @import("depth_probe_test.zig");
 +    _ = @import("draft_row_test.zig");
@@ -266,64 +238,73 @@ index ff09b58..4883a8f 100644
      _ = @import("lone_costs_test.zig");
      _ = @import("lone_backoff_test.zig");
 diff --git a/zig/src/core/lanes/windows.zig b/zig/src/core/lanes/windows.zig
-index e8e48be..16746be 100644
+index b7eb5f980..29b0c63ce 100644
 --- a/zig/src/core/lanes/windows.zig
 +++ b/zig/src/core/lanes/windows.zig
-@@ -268,7 +268,9 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
+@@ -282,7 +282,9 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
      const own = if (live) try lone_costs.prices(e, plans[0]) else untimed;
      const costs = if (explicit) &untimed else if (live) &own else &e.cfg.shared_costs;
      const overhead = if (explicit or live) 0 else e.rule.overheadMs(plans.len, anySampled(plans));
 -    const counts = try alloc.allocate(a, fixed, probs, costs, overhead, @max(plans.len, e.cfg.batch_rows));
-+    // A3: the shared table's forward priced by the streams' rows plus a draft row's ms (Model.draft_row_ms), only where the table is
-+    const row_ms = if (explicit or live) 0.0 else e.rule.draft_row_ms;
++    // Model.draft_row_ms prices the shared table's forward by the streams' rows plus a further row's ms
++    const row_ms = if (explicit or live) 0.0 else e.cfg.k.draft_row_ms;
 +    const counts = try alloc.allocateDrafts(a, fixed, probs, costs, overhead, @max(plans.len, e.cfg.batch_rows), .{ .row_ms = row_ms, .streams = plans.len });
      const trial = if (live) lone_costs.probe(e, plans[0]) else null;
      if (trial) |count| {
          counts[0] = count;
 diff --git a/zig/src/families/flashnext/cuda_lanes.zig b/zig/src/families/flashnext/cuda_lanes.zig
-index 10dfef9..40f6b58 100644
+index 08b78f34c..dcaa2ff4a 100644
 --- a/zig/src/families/flashnext/cuda_lanes.zig
 +++ b/zig/src/families/flashnext/cuda_lanes.zig
-@@ -8,6 +8,7 @@ const weights = @import("cuda_prompt_wt.zig");
+@@ -7,6 +7,7 @@ const weights = @import("cuda_prompt_wt.zig");
  const mtp = @import("cuda_mtp.zig");
  const mtp_ops = @import("cuda_mtp_ops.zig");
  const lanes_draft = @import("cuda_lanes_draft.zig");
 +const round_costs = @import("cuda_round_costs.zig");
  const snap = @import("cuda_snap.zig");
  const ranks = @import("cuda_rank_engine.zig");
- const config = @import("cuda_config.zig");
-@@ -216,6 +217,9 @@ pub fn Namespace(comptime Tri: type) type {
+ const Glue = @import("cuda_glue.zig").Glue;
+@@ -232,6 +233,9 @@ pub fn Namespace(comptime Tri: type) type {
                      .hidden_rows = true,
-                     .batch_rows = if (drafting) 4 * mtp.max_rows else round_streams,
+                     .batch_rows = if (drafting) mtp.round_rows else round_streams,
                      .max_streams = round_streams,
-+                    // a shared round's prices when TF_FLASHNEXT_ROUND_MS names them (cuda_round_costs.zig); else unpriced
++                    // a shared round's prices if TF_FLASHNEXT_ROUND_MS names them (cuda_round_costs.zig), else unpriced
 +                    .shared_costs = round_costs.sharedCosts(),
 +                    .draft_row_ms = round_costs.draftRowMs(),
-                     // a shared round's greedy streams draft in one head pass a step (lanes_draft.batched)
+                     // a shared round's streams draft in one head pass a step (lanes_draft.batched)
                      .draft_streams = drafting and lanes_draft.batchHeads(),
                  };
+diff --git a/zig/src/families/flashnext/cuda_launch.zig b/zig/src/families/flashnext/cuda_launch.zig
+index a9f72fd60..258f5140c 100644
+--- a/zig/src/families/flashnext/cuda_launch.zig
++++ b/zig/src/families/flashnext/cuda_launch.zig
+@@ -464,6 +464,7 @@ test {
+     _ = row_path;
+     _ = @import("cuda_mtp_check.zig");
+     _ = @import("cuda_mtp_cand.zig");
++    _ = @import("cuda_round_costs.zig");
+     _ = @import("cuda_draft_affine.zig");
+     _ = @import("cuda_head.zig");
+     _ = fn_back;
 diff --git a/zig/src/families/flashnext/cuda_round_costs.zig b/zig/src/families/flashnext/cuda_round_costs.zig
 new file mode 100644
-index 0000000..6421799
+index 000000000..99386ea46
 --- /dev/null
 +++ b/zig/src/families/flashnext/cuda_round_costs.zig
-@@ -0,0 +1,85 @@
-+//! The lane core's prices for a shared Flash Next round on CUDA, from the environment. Nothing is timed at load on this backend, so
-+//! without these a shared round is unpriced: every draft the head's confidence rule lets through is verified. With them the core
-+//! trims a round's drafts to the rows that pay (windows.allocate), and measures each round's time past the forward as its overhead.
+@@ -0,0 +1,81 @@
++//! A shared Flash Next round's prices from the environment (none is timed at load; unset: rounds go unpriced).
 +const std = @import("std");
 +const lanes = @import("lanes");
 +
 +const Cost = lanes.config.Cost;
 +/// Rows a shared forward holds at most (facts' batch_rows).
-+pub const max_rows = 64;
++pub const max_rows = @import("cuda_mtp.zig").round_rows;
 +
 +var table: [max_rows]Cost = undefined;
 +var table_len: usize = 0;
 +var read = false;
 +
-+/// TF_FLASHNEXT_ROUND_MS: a shared verify's forward ms by its rows. "a+b" is a + b x rows (rows 1 to 64); a comma list gives
-+/// rows 1, 2, 3 ... (the lane core interpolates between and extends past the last). Unset, or any other text: no prices.
++/// TF_FLASHNEXT_ROUND_MS: a shared forward's ms by rows, "a+b" (a + b x rows) or a list for rows 1, 2, ...; else none.
 +pub fn parse(text: []const u8, out: []Cost) usize {
 +    const t = std.mem.trim(u8, text, " \t");
 +    if (t.len == 0) return 0;
@@ -359,8 +340,7 @@ index 0000000..6421799
 +    return table[0..table_len];
 +}
 +
-+/// TF_FLASHNEXT_DRAFT_ROW_MS: a shared round's ms for each row past one a stream (a draft), apart from the table read at the
-+/// round's streams (the lane core's A3 split). Needs TF_FLASHNEXT_ROUND_MS; unset or not a positive number: 0, the table by rows.
++/// TF_FLASHNEXT_DRAFT_ROW_MS: a row's ms past one a stream, beside the table at the streams (needs ROUND_MS; else 0).
 +pub fn draftRowMs() f64 {
 +    const v = std.c.getenv("TF_FLASHNEXT_DRAFT_ROW_MS") orelse return 0;
 +    const ms = std.fmt.parseFloat(f64, std.mem.span(v)) catch return 0;
