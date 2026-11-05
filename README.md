@@ -267,6 +267,8 @@ One token's cache at TP=1, 13 layers (12 attention plus the MTP head):
 | bf16 | 30,784 | 7.52 GiB |
 | fp8, the MTP head in bf16 (the default) | 18,880 | 4.61 GiB |
 | fp8, the MTP head in fp8 too (`TF_FLASHNEXT_HEAD_KV=fp8`) | 17,888 | 4.37 GiB |
+| fp8 keys, NVFP4 values (`TF_FLASHNEXT_KV4=values`, opt-in) | 16,192 | 3.95 GiB |
+| NVFP4 keys and values (`TF_FLASHNEXT_KV4=all`, opt-in) | 13,504 | 3.30 GiB |
 
 FP8 stores keys with both scales and values as codes. The indexer key (256 bytes) and pooled blocks (64 bytes) stay
 bf16. Under `KV_DTYPE=fp8` the MTP head's own cache stays bf16 (patch `0021`), 992 bytes a token more: in fp8 the head
@@ -344,6 +346,7 @@ Every setting lives in [`scripts/config.sh`](scripts/config.sh). Override it fro
 | `TF_FLASHNEXT_PROMPT_GEMM2` | `1` | the MX128 prompt tile runs with two pipeline stages and two blocks an SM (patch 0015). Same bits, 15-25% faster per call |
 | `TF_FLASHNEXT_SHARED_SIDE` / `TF_FLASHNEXT_GDN_LANES` | `1` / `1` | the shared expert runs on a second stream in decode rounds (TensorFold's own since v1.2.2, on by default there), and a shared round takes every lane's DeltaNet rows in three launches a layer (needs `KEEP_LATE=1`) (patch 0016). Bit-identical |
 | `TF_FLASHNEXT_HEAD_KV` | `bf16` | under `KV_DTYPE=fp8` the MTP head's own cache stays bf16 (patch 0021). `fp8` puts it in fp8 too: 0.24 GiB less a stream, about 9% slower decode at 5 streams |
+| `TF_FLASHNEXT_KV4` | unset | under `KV_DTYPE=fp8`, NVFP4 cache rows (patch 0022): `values` keeps fp8 keys and stores values as E2M1 codes with an E4M3 scale per 16 and a power-of-two row scale (4.41 GiB a stream, a 4.7 GiB prompt cache at 5 streams); `all` stores keys that way too (3.76 GiB). Reads are exact bf16 values. Quality against bf16 KV in `tools/kvq.py`: `values` 3/3 needles to 250K and 20/20 lookups, as fp8; `all` 18/20 lookups. Unset is byte-identical to fp8 |
 | `CHECKPOINT` | `nvfp4` | `nvfp4` serves `nvidia/Qwen3.8-Flash-Next-FP4-Local`. `int4` is not supported on this branch. `MODEL_ID` / `MODEL_REVISION` override the model |
 | `MODEL_REVISION` | `b9ce18a6…` | the checkpoint commit this recipe serves |
 | `ABLIT` | `0` | `1` serves the checkpoint with drowzeys's Keys house-qsa abliteration overlay ([above](#ablit-opt-in)); gated, needs `HF_TOKEN`. `2` serves the same abliteration per request beside the stock model, from the stock weights (patches 0018 to 0020, [docs/ablation.md](docs/ablation.md)). Only with `CHECKPOINT=nvfp4` at the pinned revision |
@@ -420,6 +423,7 @@ DeltaNet rows applied by the next window instead of replayed) are part of v1.2.2
 | `0017` | the draft chain stops on the running product of its draft probabilities (the rule of the earlier build) |
 | `0018` to `0020` | per-request abliteration: identities served from the stock weights, each behind its own model id ([docs/ablation.md](docs/ablation.md)) |
 | `0021` | under `--kv-cache fp8` the MTP head's own cache stays bf16 (part of `0005` on v1.1.4) |
+| `0022` | opt-in NVFP4 KV rows under `--kv-cache fp8`: values only, or keys and values (`TF_FLASHNEXT_KV4`) |
 
 Every knob is an environment variable with its default in `scripts/config.sh`; the CHANGELOG lists them with the measured effect of each round.
 
@@ -432,6 +436,7 @@ Every knob is an environment variable with its default in `scripts/config.sh`; t
 | `tools/exact.py` | greedy replies: drafted, `"draft": false`, and concurrent, must match |
 | `tools/toolcheck.py` | a tool call whose array argument comes back as a JSON array |
 | `tools/needle.py` | a passphrase in a ~200,000-token prompt |
+| `tools/kvq.py` | KV format quality: the same greedy replies, needles (128K, 250K) and key lookups (34K, 136K) against a bf16-KV run |
 | `tools/prompt_reuse.py` | a resumed prompt matches a fresh one |
 | `tools/verify_ablate.py` | each model id (stock and identities) resumes only its own kept state, and its resumed greedy reply matches the cold one |
 | `tools/bench.py` | prefill at 8k-128k and a short decode |

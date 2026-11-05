@@ -5,6 +5,23 @@ Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:
 
 ## Unreleased
 
+**2026-11-06: opt-in NVFP4 KV cache (patch `0022`, `TF_FLASHNEXT_KV4=values|all` with `KV_DTYPE=fp8`; unset is byte-identical).**
+A cache row of 256 values is E2M1 codes (128 bytes), an E4M3 scale per 16 values and a power-of-two fp32 row scale, so a read is an exact bf16
+value and the attention sums are the bf16 kernels' on the dequantized rows (`tf-cuda-test flashnext-kv4`: writes equal the CPU model byte for byte,
+reads equal the bf16 kernels, contiguous, paged and lanes). Measured on the Spark, 5 x 262,144, the MTP head's cache bf16, `tools/kvq.py` against a
+bf16-KV run (22 greedy replies at 0, 32K and 120K tokens of context; needles at 128K and 250K; 20 key lookups at 34K and 136K):
+
+| KV | a stream | prompt cache at start | replies equal to bf16 | needles | lookups | 5 streams prose / code tok/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| bf16 (`PARALLEL=2`) | 7.98 GiB | 10.6 GiB | 22/22 | 3/3 | 20/20 | |
+| fp8 | 5.07 GiB | 1.5 to 2.3 GiB | 16/22 | 3/3 | 20/20 | 226.5 / 197.6 |
+| fp8 keys, NVFP4 values | 4.41 GiB | 4.7 GiB | 10/22 | 3/3 | 20/20 | 208.3 / 188.9 |
+| NVFP4 keys and values | 3.76 GiB | 7.6 GiB | 10/22 | 3/3 | 18/20 | 221.8 / 187.0 |
+
+The replies that differ from bf16 differ in wording; the facts checked (primes, a derivative, a trip time, a syllogism) are right in every run.
+One decode run each: the speeds are within the runs' spread of each other. `all` misses lookups at 136K, so `values` is the variant to use
+for a larger prompt cache; the fp8 run was against the production server, the others in one test window.
+
 **2026-11-05: TensorFold v1.2.2 (`00e7dddb`), with the patch series re-implemented on it.**
 
 - `TF_REF` is v1.2.2; the image is `tensorfold-qwen38:v1.2.2-00e7ddd`, and `libtfgrammar.so` comes from the v1.2.2 release archive (SHA-256 pinned in `config.sh`). No image of
