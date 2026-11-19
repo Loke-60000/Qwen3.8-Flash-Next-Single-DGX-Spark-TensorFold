@@ -152,6 +152,10 @@ export TF_FLASHNEXT_PRODUCT_STREAMS="${TF_FLASHNEXT_PRODUCT_STREAMS:-5}"
 # bf16 cache, so a free-running reply can differ). bf16 is exact: KV_DTYPE=bf16. FP8 works together with --vision.
 KV_DTYPE="${KV_DTYPE:-fp8}"
 MAX_TOKENS="${MAX_TOKENS:-32768}"
+# The prompt cache's cap in GiB; empty is the engine's own (16 GiB, cut to what the streams leave). With
+# TF_FLASHNEXT_KV_PAGES the cache and the streams' pages share one room: a smaller cache is more pages, and pages are
+# taken at start while the cache fills as it is used. To give other processes room, raise TENSORFOLD_MEMORY_RESERVE_GIB.
+PROMPT_CACHE_GIB="${PROMPT_CACHE_GIB:-}"
 THINKING="${THINKING:-1}"
 DRAFTS="${DRAFTS:-1}"
 # Sampling defaults (a request's own values win). The Zig server honours these flags.
