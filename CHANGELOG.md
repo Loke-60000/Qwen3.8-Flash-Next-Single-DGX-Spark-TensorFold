@@ -15,7 +15,7 @@ format's model byte for byte; contiguous, paged, one-launch lanes and the head's
 2.4k-token prompts and 14 beside a 120k-token one, a video (two colours named) and a PDF (its word read). The image is MiaAI-Lab's Dockerfile
 with the engine stage built outside it. Prefill is 8% behind the v1.2.2 lab build at 16k and 63k (the retired prefill patches; MiaAI-Lab
 measures v1.2.7 behind v1.1.4 too), decode is level at 1 to 8 streams, 3 to 16% ahead at 12 and 9 to 13% behind at 15, and the first token
-comes 10 to 25% sooner; see "This fork" in `README.md`.
+comes 8 to 15% sooner; see "This fork" in `README.md`.
 
 **2026-11-18: `scripts/harden.sh` (new) cuts the NGC base's unused ballast into its own image tag, opt-in.**
 [issue #77](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/77) by
