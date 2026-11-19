@@ -15,12 +15,12 @@
 
 Serve **Qwen3.8 Flash Next** from a single NVIDIA DGX Spark (GB10, 128 GB) through an OpenAI-compatible API. It runs
 [TensorFold](https://github.com/ashhart/TensorFold)'s Zig engine, `tensorfold-native` (release
-[v1.2.2](https://github.com/ashhart/TensorFold/releases/tag/v1.2.2), commit `00e7dddb`, with this recipe's patches on top), in NVIDIA's PyTorch container. One GPU,
-with image and video input (`VISION=1`). `VISION=0` serves text only.
+[v1.2.7](https://github.com/ashhart/TensorFold/releases/tag/v1.2.7), commit `93a2e93e`, with this recipe's patches on top), in NVIDIA's PyTorch container. One GPU,
+with image input (`VISION=1`) and, with `VIDEO=1`, video too (see [Images and video](#images-and-video)). `VISION=0` serves text only.
 
 The default checkpoint is NVIDIA's FP4 QAD export: routed experts in NVFP4 (group size 16, CSF-compressed scale factors),
 attention and shared-expert linears in MXFP8, the MTP experts and the vision tower quantized too (MXFP8 attention, W4A16
-NVFP4 MLP), an FP8 n-gram table, and all 512 routed experts with 10 per token (the INT4 cut keeps 5). The INT4-AutoRound checkpoint (served by the db281878 recipe on `main`, not by this v1.2.2 branch) uses 5 experts per token (4.8B active
+NVFP4 MLP), an FP8 n-gram table, and all 512 routed experts with 10 per token (the INT4 cut keeps 5). The INT4-AutoRound checkpoint (served by the db281878 recipe on `main`, not by this branch) uses 5 experts per token (4.8B active
 parameters) and scores about 10% lower general capability on its authors' own harness (46.6-47.6 against 51.8). Tool use
 is unchanged.
 
@@ -29,80 +29,117 @@ is unchanged.
 - Checkpoint (not supported on this branch; the db281878 recipe on `main` serves it): [`azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound`](https://huggingface.co/azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound)
   at revision `1464274120d36a4d8fcaa934552334a7d83ce0fd` (~122 GiB). Routed experts are GPTQ int4 (group size 128), the
   n-gram table is FP8 and lives in `ple-table/`, and it is loaded with the weights. There is no SSD n-gram reader and
-  no int8 KV cache. KV is FP8 by default (lossy, ~98.8% top-1 agreement with bf16); `KV_DTYPE=bf16` is exact. FP8 works with image and video input.
+  no int8 KV cache. KV is FP8 by default (lossy, ~98.8% top-1 agreement with bf16); `KV_DTYPE=bf16` is exact. FP8 works with image input.
 - API model id: `Qwen3.8-Flash-Next`
 - Context: **262,144 tokens** a request (the native window). Up to 5 requests at once (`PARALLEL`). A full
-  262,144-token window takes 5.07 GiB a stream with the fp8 cache, and a `PARALLEL` whose windows do not all fit is refused when the server starts
-  (see [KV and memory](#kv-and-memory)). The engine keeps 9 GiB free, and another 2 GiB for the vision helper.
+  262,144-token window takes 4.78 GiB a stream with the fp8 cache, and a `PARALLEL` whose windows do not all fit is refused when the server starts
+  (see [KV and memory](#kv-and-memory)). The engine keeps 9 GiB free, and another 2 GiB for the vision path.
 - One command: `./start.sh` sets everything up on the first run and starts the server; `./stop.sh` stops it
 
 ## Performance
 
-Numbers for the default checkpoint, **`nvidia/Qwen3.8-Flash-Next-FP4-Local`** (NVIDIA's QAD FP4 export): 262,144-token window, 5 requests at once, fp8 KV,
-vision on, MTP drafts, three identities loaded (`TENSORFOLD_IDENTITIES`; the benchmark's requests are stock ones), TensorFold v1.2.2 with patches `0001` to `0021`.
-One DGX Spark (GB10), measured with `tools/bench_streams.py` running on the same Spark as the server: greedy, 256 tokens a request, median of 3. Total is the sum
-over the concurrent requests; TTFT is the time to the first token. "Before" is the v1.1.4 build with patches `0001` to `0020`, measured the same way on the same
-Spark. Gain is (after / before - 1); for TTFT a negative number is better.
+> **The sparkDash tables below are the v1.1.4 build's** (TensorFold v1.1.4 with its patches `0001` to `0017`, 2026-10-27). The recipe now builds
+> TensorFold v1.2.7 with patches `0001` to `0005` ([What the patches are](#what-the-patches-are); the A/B below ran on `0001` to `0004`); sparkDash has not been
+> re-run on it. What has been
+> measured is an A/B of the two builds with `tools/bench_streams.py` on the same Spark (2026-11-12, defaults, greedy, 256 tokens, median of 3,
+> every stream the same prompt; v1.2.7 here with its default 1,536-row passes):
+>
+> | | v1.1.4 build | v1.2.7 build | Change |
+> | --- | ---: | ---: | ---: |
+> | Decode prose, 1 / 3 / 5 streams (total tok/s) | 57.8 / 133.4 / 167.9 | 58.5 / 156.1 / 230.1 | +1% / +17% / +37% |
+> | Decode code, 1 / 3 / 5 streams (total tok/s) | 48.2 / 104.0 / 141.3 | 51.9 / 138.8 / 206.8 | +8% / +33% / +46% |
+> | TTFT at 5 streams, prose / code (ms) | 440 / 372 | 177 / 173 | -60% / -53% |
+> | Prefill 4k / 31k / 126k tokens (tok/s) | 2,329 / 2,566 / 2,397 | 2,108 / 2,166 / 2,047 | -9% / -16% / -15% |
+>
+> With `TF_FLASHNEXT_CHUNK=3072` (now the recipe's default, as the v1.1.4 build had) v1.2.7 prefilled 2,143 / 2,252 / 2,140 tok/s. With patch `0004`
+> (the MXFP8 prompt tile, ported 2026-11-13) it prefills **2,303 / 2,443 / 2,293 tok/s**, 1-5% behind the v1.1.4 build, and a 199,730-token prompt in
+> 95.7 s (v1.1.4: 100.7 s). Decode and time to first token are unchanged by `0004` and faster than v1.1.4 at every stream count.
 
-**Decode, prose** (total tok/s / per request tok/s / TTFT)
+Numbers for the default checkpoint, **`nvidia/Qwen3.8-Flash-Next-FP4-Local`** (NVIDIA's QAD FP4 export), as `./start.sh` served it: 262,144-token
+window, 5 requests at once, fp8 KV, vision on, MTP drafts, TensorFold v1.1.4 with patches `0001` to `0017`. One DGX Spark (GB10), measured with
+[sparkDash](https://github.com/MiaAI-Lab/sparkDash)'s Decode and Prefill benchmarks, running on the same Spark as the server (no network between
+them). Prose: temperature 0.7, thinking on. Code: temperature 0, thinking off. Aggregate is the sum of the per-request decode speeds; TTFT is the
+time to the first token.
 
-| Concurrent requests | Before | After | Total | Per request | TTFT |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 55.7 / 55.7 / 87 ms | 53.4 / 53.4 / 68 ms | -4.1% | -4.1% | -21.8% |
-| 2 | 105.9 / 53.0 / 154 ms | 102.9 / 51.5 / 103 ms | -2.8% | -2.8% | -33.1% |
-| 3 | 128.6 / 42.9 / 229 ms | 144.3 / 48.1 / 135 ms | +12.2% | +12.1% | -41.0% |
-| 4 | 147.9 / 37.0 / 309 ms | 182.0 / 45.5 / 170 ms | +23.1% | +23.0% | -45.0% |
-| 5 | 165.2 / 33.0 / 386 ms | 226.5 / 45.3 / 215 ms | **+37.1%** | +37.3% | -44.3% |
+How a decode figure is taken (sparkDash's `DecodeBench`): each request streams, and its decode speed is `(completion_tokens - 1) / (time of the last streamed token - time of
+the first)`, so TTFT is not in it. The prose prompt asks for a step-by-step explanation of how a hash map works. The code prompts (`DECODE_CODE_TASKS` in sparkDash's
+`src/shared/llmPrompts.js`) each name a small Python function or class and end "Output only Python source. No comments, no docstrings, no markdown fences. Then add tests and the helpers this
+needs. Keep writing code.", and every concurrent stream gets a different task. MTP drafts pay only when they are accepted, so decode speed depends on the text: a code request that asks for docstrings and
+comments, or a different prose prompt, decodes at another speed, and a figure from another harness is comparable only with the same prompts, sampling and thinking setting. `tools/bench_streams.py`
+uses its own, shorter prompts and does not turn thinking off for code, so its code rows are not comparable with the table's ([#85](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/85),
+[#86](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/86)).
+
+**Decode, prose**
+
+| Concurrent requests | Aggregate | Per request | TTFT |
+| ---: | ---: | ---: | ---: |
+| 1 | 55.6 tok/s | 55.6 tok/s | 136 ms |
+| 2 | 95.4 tok/s | 49.4 tok/s | 234 ms |
+| 4 | 145.1 tok/s | 38.1 tok/s | 300 ms |
+| 5 | 156.1 tok/s | 35.0 tok/s | 370 ms |
 
 **Decode, code**
 
-| Concurrent requests | Before | After | Total | Per request | TTFT |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 47.5 / 47.5 / 85 ms | 45.2 / 45.2 / 68 ms | -4.8% | -4.8% | -20.0% |
-| 2 | 77.7 / 38.9 / 154 ms | 92.2 / 46.1 / 102 ms | +18.7% | +18.5% | -33.8% |
-| 3 | 101.0 / 33.7 / 220 ms | 124.3 / 41.4 / 135 ms | +23.1% | +22.8% | -38.6% |
-| 4 | 120.7 / 30.2 / 300 ms | 167.5 / 41.9 / 170 ms | +38.8% | +38.7% | -43.3% |
-| 5 | 137.4 / 27.5 / 380 ms | 197.6 / 39.5 / 202 ms | **+43.8%** | +43.6% | -46.8% |
+| Concurrent requests | Aggregate | Per request | TTFT |
+| ---: | ---: | ---: | ---: |
+| 1 | 110.5 tok/s | 110.5 tok/s | 164 ms |
+| 2 | 147.2 tok/s | 78.7 tok/s | 212 ms |
+| 4 | 192.9 tok/s | 52.7 tok/s | 374 ms |
+| 5 | 217.6 tok/s | 48.0 tok/s | 403 ms |
 
-**Prefill** (cold prompts, no prompt-cache hit; tok/s / TTFT)
+**Prefill** (cold prompts, no prompt-cache hit)
 
-| Prompt tokens (before / after) | Before | After | Prefill | TTFT |
-| ---: | ---: | ---: | ---: | ---: |
-| 3,997 / 4,003 | 2,396 / 1.66 s | 2,367 / 1.68 s | -1.2% | +1.2% |
-| 7,945 / 7,929 | 2,540 / 3.13 s | 2,553 / 3.10 s | +0.5% | -1.0% |
-| 15,763 / 15,778 | 2,557 / 6.17 s | 2,599 / 6.08 s | +1.6% | -1.5% |
-| 31,475 / 31,496 | 2,567 / 12.28 s | 2,520 / 12.53 s | -1.8% | +2.0% |
-| 62,899 / 62,917 | 2,515 / 25.06 s | 2,470 / 25.53 s | -1.8% | +1.9% |
-| 125,707 / 125,729 | 2,395 / 52.58 s | 2,398 / 52.50 s | +0.1% | -0.2% |
+| Prompt tokens | Prefill | TTFT |
+| ---: | ---: | ---: |
+| 4,134 | 3,050 tok/s | 1.52 s |
+| 8,231 | 2,956 tok/s | 2.95 s |
+| 16,421 | 2,839 tok/s | 5.95 s |
+| 32,807 | 2,735 tok/s | 12.16 s |
+| 65,574 | 2,230 tok/s | 29.57 s |
+| 131,110 | 2,269 tok/s | 57.94 s |
 
-The gain is at three to five requests: total decode +12% to +37% on prose and +23% to +44% on code, with the first token 39% to 47% sooner. One request is slower,
--4.1% on prose and -4.8% on code, and two requests' prose -2.8%. Cold prefill is level (-1.8% to +1.6%).
+Three concurrent requests were not part of this run. Against the previous sparkDash run of the db281878 build with patches `0001` to `0015` (same Spark, same
+tool; the CHANGELOG has every row): prose aggregate is +10% at one request, +30% at two, +36% at four and +18% at five; code is +63%, +47%, +47% and +45%;
+cold prefill is +14.5% at 4k, +14.4% at 8k, +13.5% at 16k, +12.6% at 32k, -4.3% at 64k and +3.3% at 128k. Time to first token under load is higher at four
+and five requests (+23% and +39% on prose, +16% and +24% on code) and lower at one (-30% prose, -9% code). The 64k prefill point reads below the 32k and 128k points and
+below the 2,331 tok/s of the earlier run; we have not repeated it, so treat it as one noisy reading until we do.
 
-A single request measured sparkDash-style (400 tokens, three runs, median; prose at temperature 0.7 with thinking on, code at temperature 0 with
-thinking off; decode speed after the first token) gives code 93.7 tok/s against 90.5 before (+3.5%) and prose 47.5 against 51.6 (-7.9%). Single prose readings
-spread from 45.9 to 59.4 tok/s (before: 47.5 to 60.3). sparkDash itself has not been run on this build; the sparkDash tables of the v1.1.4 build (1, 2, 4 and 5
-requests) are in the CHANGELOG. Decode speed depends on the text, since MTP drafts pay only when they are accepted: `tools/bench_streams.py` uses its own, shorter
-prompts and does not turn thinking off for code, so its code rows are not comparable with sparkDash's
-([#85](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/85),
-[#86](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/86)). Run the benchmarks on the Spark itself: from another machine over a
-slow link they add the link's round trip to every TTFT and stagger the requests, which lowers the multi-stream numbers.
+Single-stream prose varied from run to run in the earlier measurements, 46 to 55 tok/s with the same settings (46.2, 46.9, 48.5 and 55.0 tok/s in four runs, about
+15%). The one new reading, 55.6 tok/s, is at the top of that range, so the +10% at one request is within the old spread. Run sparkDash on the Spark itself: from
+another machine over a slow link it adds the link's round trip to every TTFT (about 1.1 s over a 387 ms Tailscale path in our test) and staggers the requests,
+which lowers the multi-stream numbers.
 
-With the MTP head's own cache in fp8 as well (`TF_FLASHNEXT_HEAD_KV=fp8`, see [KV and memory](#kv-and-memory)), decode at five requests is 8.7% slower on prose
-(206.8 tok/s) and 8.5% on code (180.8), and the single code request 77.3 tok/s.
+Against our earlier Python-engine build of the same checkpoint (measured the same way on another Spark: prose 54.4, 81.3, 88.5, 101.6 and 123.1 tok/s aggregate
+at 1 to 5 requests; code 84.9, 128.3, 142.3, 159.5 and 181.9; prefill 2,315 tok/s at 4k down to 1,889 at 128k), this build is ahead at every point measured:
+prose +2% at one request, +17% at two, +43% at four and +27% at five; code +30%, +15%, +21% and +20%; prefill +32% at 4k and +20% at 128k.
+The Python numbers come from an earlier run with its own settings, so read these percentages as indicative.
 
-### Checks on the current build
+### Checks
 
-Run on one DGX Spark in the shape above (5 requests, 262,144-token window, fp8 KV, vision on, three identities loaded), all passing:
+On the v1.2.7 build with patches `0001` to `0004` (2026-11-13, one Spark, the defaults: 5 requests, 262,144-token window, fp8 KV, vision on), all passing:
+`tools/exact.py --pad 3000` (six drafted greedy replies, 551 drafts accepted, equal `"draft": false`; six concurrent equal one-at-a-time) and `tools/exact.py`,
+`tools/toolcheck.py` 3/3, `tools/visioncheck.py`, `tools/prompt_reuse.py 30000` (worst 99.3%), a 199,730-token needle found (prefill 95.7 s),
+`tools/context_boundary.py --context 262144` (16 checks), and `tf-cuda-test qmmf-prompt-mx` on the GPU (the prompt tile's FP64 bound and row-independent bytes).
+With patches `0001` to `0003` (2026-11-12) the same checks passed, plus live `tool_choice: "required"`, a named function, Anthropic `{"type":"any"}` and a
+`response_format` JSON schema. Not re-run on v1.2.7: the sampled-exactness check.
 
-- `tools/exact.py`: six drafted greedy replies (545 drafts accepted) equal the `"draft": false` ones, and six concurrent replies equal the one-at-a-time ones.
-- `tools/toolcheck.py` 3/3, `tools/visioncheck.py` (the model sees the red circle and the blue square), `tools/prompt_reuse.py 30000 3` (every follow-up
+`0005` (video) has not been run on a Spark: it compiles (`zig build check-native-cuda-host`, zig 0.17.0) and its library builds (`zig build video`), but no
+server has served a video from this image. Nothing a text request runs goes through it, and an image request meets only its placeholder check, which now
+accepts a group of `<|video_pad|>` rows beside the image groups it already knew.
+
+#### On the v1.1.4 build
+
+Run on one DGX Spark with the defaults (5 requests, 262,144-token window, fp8 KV, vision on), all passing. The sampled-exactness check and the 200k needle ran on the
+integration build with patches 0001 to 0016 (patch 0017 changes only how many drafts are proposed); the others also ran on the live container with 0017:
+
+- `tools/exact.py --pad 3000`: six drafted greedy replies (538 drafts accepted) equal the `"draft": false` ones, and six concurrent replies equal the
+  one-at-a-time ones.
+- A sampled-exactness check (six sampled replies, drafted against `"draft": false`, equal across runs) with the engine's prompt-keyed seeds (`--prompt-seed`).
+- `tools/toolcheck.py` 3/3, `tools/visioncheck.py` (the model sees the red circle and the blue square), `tools/prompt_reuse.py 30000` (every follow-up
   resumed at least 90% of its prompt, worst 99.3%).
-- `tools/verify_ablate.py` with the stock id and the three identities: each id's cold pass starts from zero and its resumed greedy reply equals the cold one.
-- The engine's GPU kernel tests (`tf-cuda-test`): `flashnext-kv8`, `hc-fuse`, `flashnext-gdn-lanes`, `flashnext-cand`, `nvfp4-fact`, `flashnext-attn`,
-  `flashnext-hc`, `flashnext-draft-affine`, `flashnext-shared`, `flashnext-fp8-experts`, `lane-half` and `flashnext-pages`.
-
-Not run on this build yet: the sampled-exactness check, the 200k needle, `tool_choice: "required"`, a named function and a `response_format` JSON schema on live
-requests, and `tools/context_boundary.py`.
+- A 199,730-token needle in a haystack is found, with a prefill of 100.7 s.
+- `tool_choice: "required"`, a named function, Anthropic `{"type":"any"}` and a `response_format` JSON schema each return a valid call or object (live requests).
+- `tools/context_boundary.py --context 262144`: a prompt plus reply that fills the window is admitted, with drafts on and off; one token over is refused.
 
 ## Requirements
 
@@ -123,7 +160,7 @@ cd Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold
 ./start.sh
 ```
 
-The first run builds the engine (TensorFold v1.2.2 plus `patches/`; the kernels are embedded in the binary) and
+The first run builds the engine (TensorFold v1.2.7 plus `patches/`; the kernels are embedded in the binary) and
 downloads the checkpoint if it is not already in the cache. Later starts load the weights. `start.sh` shows each
 step, runs a smoke test, prints `Qwen3.8-Flash-Next is now LIVE! on port 8888`, and returns you to the shell.
 
@@ -151,7 +188,7 @@ curl -s http://<spark-address>:8888/health
 ## Choosing the checkpoint
 
 `./start.sh` serves NVIDIA's FP4 QAD checkpoint, `nvidia/Qwen3.8-Flash-Next-FP4-Local` at the pinned revision (`CHECKPOINT=nvfp4`, the default). The
-INT4-AutoRound checkpoint (`CHECKPOINT=int4`) is **not supported on this branch**: TensorFold v1.2.2's Flash Next engine has no INT4 path, and none of the numbers
+INT4-AutoRound checkpoint (`CHECKPOINT=int4`) is **not supported on this branch**: TensorFold's Flash Next CUDA engine has no INT4 path, and none of the numbers
 or patches here were tried with it. The db281878 recipe on `main` still serves it.
 
 Check which checkpoint is running with `docker inspect -f '{{.Config.Cmd}}' qwen38-flash-next-tf`: the path after `serve` names it. `DRY_RUN=1 ./start.sh`
@@ -183,15 +220,15 @@ sidecar would not sort first. It only works for `CHECKPOINT=nvfp4` at the pinned
 is active with `docker inspect -f '{{.Config.Cmd}}' qwen38-flash-next-tf`: the path after `serve` ends in `ablit-b9ce18a6-c44f5b92`.
 
 **What has been checked.** The folder builder against the real sidecar and the real stock index and shard headers (24 of 24 names, same dtypes and shapes), and offline tests
-(`tools/test_ablit_view.py`). A server has booted with `ABLIT=1` on the v1.1.4 build and answered `/health`; `tools/exact.py`, `tools/needle.py` and a refusal check on it have **not** been run yet. The overlay author's own
+(`tools/test_ablit_view.py`). A server has booted with `ABLIT=1` on this build and answered `/health`; `tools/exact.py`, `tools/needle.py` and a refusal check on it have **not** been run yet. The overlay author's own
 numbers (refusal32 32/32 on a thinking-off run of their TensorFold recipe) are theirs, not measured here. The edit changes the weights, so replies differ from the stock checkpoint's: the byte-identical
 checks in this repository compare a build against itself, not `ABLIT=1` against `ABLIT=0`.
 
 ## Images and video
 
-The model's own vision tower (27 layers, 0.84 GiB, from the same checkpoint) turns images and video frames into
-tokens. A Python helper in the image decodes them (Pillow, PyAV) and runs the tower. Send them as OpenAI-style
-content parts in a user message:
+The model's own vision tower (27 layers, 0.84 GiB, from the same checkpoint) turns images into tokens. The engine
+decodes them itself (libjpeg-turbo for JPEG, libwebp's decoder for WebP, both built into the image) and runs the tower
+on the GPU. Send them as OpenAI-style content parts in a user message:
 
 ```bash
 IMG=$(base64 -w0 photo.jpg)
@@ -204,23 +241,59 @@ curl -s http://<spark-address>:8888/v1/chat/completions -H 'Content-Type: applic
 }'
 ```
 
-A video is a `video_url` part (`{"type": "video_url", "video_url": {"url": "data:video/mp4;base64,..."}}`).
+**Video is opt-in (`VIDEO=1 ./start.sh restart`).** The engine samples a clip at 2 frames a second and gives the tower
+two frames a group, each group costing tokens like an image does. Decoding runs in the server through
+`libtfvideo.so` — TensorFold's own `tf_video.c` over a static FFmpeg 9.0.2 that `scripts/prepare.sh` builds from the
+tarball whose SHA-256 it pins, configured with only the H.264, HEVC, VP8, VP9 and MPEG-4 decoders, the MP4/MOV and
+Matroska/WebM demuxers, and `--disable-network` and `--disable-programs`. The image keeps that library in
+`/opt/tensorfold/libexec/tfvideo`, off every path the server probes for it, so with the default `VIDEO=0` a
+`video_url` part is refused and nothing links FFmpeg at all; `VIDEO=1` puts that directory on the loader's path and
+passes `--vision-video-tokens`. It needs `VISION=1`, and takes OpenAI's part shape:
 
-| | Images | Videos |
-| --- | --- | --- |
-| Formats | JPEG, PNG, WebP | MP4, WebM, MOV, MKV (anything FFmpeg decodes) |
-| Per request | up to 50 (all of a chat's turns count), 10 MB each, 64 MB in all | up to 4 (`MAX_VIDEOS`), 64 MB each, 96 MB in all, up to an hour of footage |
-| Tokens | up to 16,384 for all images, at most 4,096 an image (`"detail": "low"`: 256 an image) | 2 frames a second (at most 256 frames), up to 16,384 tokens a request (`TENSORFOLD_VIDEO_TOKENS`) |
+```bash
+VID=$(base64 -w0 clip.mp4)
+curl -s http://<spark-address>:8888/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "Qwen3.8-Flash-Next",
+  "messages": [{"role": "user", "content": [
+    {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,'"$VID"'"}},
+    {"type": "text", "text": "What happens in this clip?"}]}],
+  "max_tokens": 2000
+}'
+```
+
+- **Per request:** up to `MAX_VIDEOS` clips (4) sharing `TENSORFOLD_VIDEO_TOKENS` (16,384 rows) between them, at most
+  256 frames a clip. A clip's frame groups count against the same 50-group and 16,384-row budgets as images, so with
+  everything at its defaults a request carries roughly 50 seconds of footage, its images included.
+- **Where it comes from:** the engine patch is [chai-md](https://github.com/chai-md)'s (#90), re-based onto v1.2.7 as
+  `patches/0005`; the server side (`--vision-max-videos`, `--vision-video-tokens`, the video part, the sampler in
+  `core/qwen_vl/video.zig`) is TensorFold's, and it is the same path the Triton host already runs.
+- **Not measured on a Spark yet:** the patch compiles (`zig build check-native-cuda-host`) and `zig build video` makes
+  the library, but no live video request has been served here, and `tools/visioncheck.py` covers images only. Say what
+  you see.
+
+- **Formats:** JPEG, PNG, WebP.
+- **Per request:** up to 50 images (all of a chat's turns count), 10 MB each, 64 MB in all.
+- **Tokens:** up to 16,384 for all images, at most 4,096 an image (`"detail": "low"`: 256 an image).
+
+**PDF document parts are opt-in (`PDF=1 ./start.sh restart`).** With it the server takes `--vision-pdf` and reads Anthropic's
+`{"type": "document"}` part, OpenAI's `file` / `input_file` part and an `image_url` carrying a `data:application/pdf;base64,`
+URL: the engine renders each page to an image with its own PDFium (`libpdfium.so`, from the pinned pypdfium2 wheel in the
+image) and the request continues as an image prompt. Upstream's caps apply: 32 MiB a document, 16 pages
+(`TENSORFOLD_MAX_PDF_PAGES` lowers the count) and the pages share the request's image budget; the document's bytes are
+checked before anything parses them, and rendering runs in a `tensorfold-native --pdf-render-worker` child started per
+document and killed at its deadline. Inline data only: a `document.source.url` is refused rather than fetched, and
+`VISION_URLS` does not change that. Without `PDF=1` these parts are refused with `PDF inputs are off on this server;
+start the server with --vision --vision-pdf`, so a client never gets a silently different treatment than it asked for.
 
 By default only data URLs are accepted. `VISION_URLS=1` also lets the server fetch public `https://` URLs. Image prompts are kept for prefix reuse
-(each image matched by its position, grid and a hash of its bytes, built into TensorFold), so a chat's next turn after an image
-prefills only its new rows, but the vision tower still runs for every image each turn. Their states stay in memory and are not saved to disk. Video prompts are not kept. A request body
-can be up to 96 MiB. `VISION=0 ./start.sh restart` serves text only and gives the 2 GiB helper workspace back to the
+(each image matched by a hash of its bytes, built into TensorFold since v1.1.4), so a chat's next turn after an image
+prefills only its new rows, but the vision tower still runs for every image each turn. A request body
+can be up to 96 MiB. `VISION=0 ./start.sh restart` serves text only and gives the 2 GiB vision workspace back to the
 KV pool.
 
 Measured on the Zig engine at TP=1 with `--vision` (warm, three reps): one image (1,217 tokens) 1.0 s to first token,
-10 images (3,035 tokens) 2.3 s, a 30-second video (6,875 tokens) 5.2–5.6 s. The first use of a new size is slower (a
-5,107-token image took 35 s). The helper stays at 0.84 GiB for the tower and peaked around 1–1.7 GiB. Text replies
+10 images (3,035 tokens) 2.3 s. The first use of a new size is slower (a
+5,107-token image took 35 s). The Python helper those runs measured stayed at 0.84 GiB for the tower and peaked around 1–1.7 GiB. Text replies
 with vision on matched the text-only engine. Those timings are from that engine build; this recipe's own vision boot
 has not been taken while the text server is in use.
 
@@ -240,10 +313,12 @@ the docker command and changes nothing.
 **`scripts/prepare.sh`:**
 
 1. Preflight: Docker, disk.
-2. The image `tensorfold-qwen38:v1.2.2-00e7ddd`: TensorFold v1.2.2 (`TF_REF`) with every `patches/*.patch` applied, Zig 0.17.0, libjpeg-turbo and libwebp's decoder
-   (built from checksummed sources), on `nvcr.io/nvidia/pytorch:26.07-py3`; the build runs `fatbins native` only. `libtfgrammar.so` is copied out of TensorFold's v1.2.2 release archive
-   (SHA-256 pinned in `config.sh`). It first tries a prebuilt image of this patch set from GitHub Container Registry, by its tag; none is published for the v1.2.2 series yet,
-   so it builds locally (`PULL=0` always builds locally).
+2. The image `tensorfold-qwen38:v1.2.7-93a2e93`: TensorFold v1.2.7 (`TF_REF`) with every `patches/*.patch` applied, Zig 0.17.0, libjpeg-turbo and libwebp's decoder
+   (built from checksummed sources), FFmpeg 9.0.2 and `libtfvideo.so` (`zig build video`, off the paths the server probes) and
+   the wheel's `libpdfium.so`, on `nvcr.io/nvidia/pytorch:26.07-py3`; the build runs `fatbins native video`. `libtfgrammar.so` is copied out of TensorFold's v1.2.7 release archive
+   (SHA-256 pinned in `config.sh`, the same as the release's own `.sha256`). It tries a matching prebuilt image from GitHub
+   Container Registry first (`PULL=0` builds locally). No image of the v1.2.7 patch set is published yet, so the first run builds it; the v1.1.4 image
+   (`v1.1.4-eab8582-4baf16137ecd`) stays in the registry.
 3. The checkpoint, at the pinned revision.
 4. A check that it is a `qwen4_exp` ModelOpt NVFP4 checkpoint and every shard present.
 5. With `ABLIT=1` only: the overlay's sidecar from Hugging Face, and the checkpoint folder with it grafted in ([ABLIT](#ablit-opt-in)).
@@ -254,10 +329,40 @@ scripts/prepare.sh --rebuild
 PREPARE=1 ./start.sh restart
 ```
 
+### Hardening the image (opt-in)
+
+`scripts/harden.sh` (new) cuts the parts of NVIDIA's NGC base this recipe never runs, as a layer of its own: `linux-libc-dev`
+(the container shares the host's kernel), the Nsight profilers, and Debian's `python3-pip`/`python3-setuptools` with their
+vendored `urllib3` and `msgpack` copies, then reinstalls `python3-yaml`, which `apt-get autoremove` otherwise takes and which
+the container-side checkpoint download imports. It never touches `$IMAGE`: it tags
+`tensorfold-qwen38:<tag>-hardened-<hash>` beside it, and you serve that one with
+`IMAGE=tensorfold-qwen38:<tag>-hardened-<hash> ./start.sh restart`. Nothing in `prepare.sh` or `start.sh` runs it, so the
+default image and its published tag are unchanged.
+
+Two knobs, both off by default because both trade reproducibility for CVE counts: `APT_UPGRADE=1` (an `apt-get upgrade`, so
+distro fixes the scanner wants) and `PIP_UPGRADE="urllib3==2.8.0 pillow==13.0.0"` (pip versions by name; nothing is pinned or
+upgraded unless you name it). `PIP_UNINSTALL="wandb jupyterlab notebook nbconvert jupyter_server flash_attn"` covers a base
+that still carries them — the pinned `26.07-py3` does not, so it is empty here.
+
+The script calls no scanner (nothing here is installed to run one) and promises no CVE count: [issue #77](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/77)
+reports 28 CRITICAL and 628 HIGH falling to 0 and 0, measured on the older `zig-db28187` image, and no scan has been run
+against this one. What it does promise is a gate you can trust without a scanner: the new tag is kept only if
+`tensorfold-native --help` and `tensorfold-native serve --help` still run, the decoders are still where the engine looks, and
+`yaml, requests, filelock, fsspec, packaging, huggingface_hub` plus the `hf` CLI are still there for the download path —
+otherwise it removes the tag and leaves `$IMAGE` alone. Run it and the check yourself:
+
+```bash
+scripts/harden.sh                                    # ~1 min on a cached base
+trivy image --severity CRITICAL,HIGH tensorfold-qwen38:v1.2.7-93a2e93-hardened-<hash>   # your scanner, your counts
+```
+
+One expectation to set: the image does not get smaller. The purged files go into a later layer as whiteouts, so the base's
+layers still hold their bytes; what changes is the filesystem the server — and a scanner that reads the merged rootfs — sees.
+
 ## KV and memory
 
 KV is FP8 by default (`KV_DTYPE=fp8`). It is lossy: about 98.8% top-1 agreement with a bf16 cache, so a free-running
-reply can differ from the bf16 one. `KV_DTYPE=bf16` is the exact cache. FP8 works together with image and video input.
+reply can differ from the bf16 one. `KV_DTYPE=bf16` is the exact cache. FP8 works together with image input.
 The format is adapted from MiaAI-Lab's GLM recipe patch `0038-glm-kv-fp8`.
 
 One token's cache at TP=1, 13 layers (12 attention plus the MTP head):
@@ -265,38 +370,39 @@ One token's cache at TP=1, 13 layers (12 attention plus the MTP head):
 | | bytes a token | one 262,144-token sequence |
 | --- | ---: | ---: |
 | bf16 | 30,784 | 7.52 GiB |
-| fp8, the MTP head in bf16 (the default) | 18,880 | 4.61 GiB |
-| fp8, the MTP head in fp8 too (`TF_FLASHNEXT_HEAD_KV=fp8`) | 17,888 | 4.37 GiB |
-| fp8 keys, NVFP4 values (`TF_FLASHNEXT_KV4=values`, opt-in) | 16,192 | 3.95 GiB |
-| NVFP4 keys and values (`TF_FLASHNEXT_KV4=all`, opt-in) | 13,504 | 3.30 GiB |
+| fp8 | 17,888 | 4.37 GiB |
 
 FP8 stores keys with both scales and values as codes. The indexer key (256 bytes) and pooled blocks (64 bytes) stay
-bf16. Under `KV_DTYPE=fp8` the MTP head's own cache stays bf16 (patch `0021`), 992 bytes a token more: in fp8 the head
-loses about a fifth of its accepted drafts, and decode at five requests is about 9% slower (see [Performance](#performance)).
+bf16. For scale, a 1,048,576-token sequence would take 17.46 GiB of fp8 cache and 30.06 GiB of bf16; the window
+this build serves stops at 262,144 (below).
 
-**Total available KV cache with the default checkpoint (NVIDIA FP4): about 26 to 27 GiB on our Spark, roughly 1.3 to 1.4 million fp8 tokens.** That is the pool the
-engine reports at start, measured with vision on, `PARALLEL=5` and `TENSORFOLD_MEMORY_RESERVE_GIB=4`, from 108 GiB of `MemAvailable`: "model 74.70 GiB; 5 streams at once,
-5.07 GiB each at a 262144-token window (fp8 caches), of 26.8 GiB left after a 4.0 GiB reserve; prompts in passes of up to 3072 rows, a 1.5 GiB prompt cache" (26.0 GiB
-and 0.6 GiB on a test start, 27.7 GiB and 2.3 GiB on the production start). The engine counts 5.07 GiB for each stream at a 262,144-token window (4.83 GiB with `TF_FLASHNEXT_HEAD_KV=fp8`,
-4.78 GiB on v1.1.4). Loading the weights takes about 81 GiB of memory (the 26.8 GiB NVFP4 n-gram table stays on disk: patch `0013` reads its rows with `pread`
-past the page cache into a 256 MiB row cache). The pool is `MemAvailable` after the weights load, minus `TENSORFOLD_MEMORY_RESERVE_GIB` (9 GiB by default), and with
-`VISION=1` minus 2 GiB kept for the helper (`TENSORFOLD_VISION_WORKSPACE_MIB`; the tower peaks around 0.9-1.7 GiB). It follows the free memory at start (other
-containers on the machine shrink it), and each GiB less reserve adds a GiB to it. At the default 9 GiB reserve the start above would leave about 21.8 GiB, less
-than five full windows take, so `PARALLEL=5` needs about 112 GiB of `MemAvailable` at start with the defaults (calculated from that start, not run).
+**Total available KV cache with the default checkpoint (NVIDIA FP4): about 27 to 29 GiB, roughly 1.4 to 1.6 million fp8 tokens.** That is the pool the engine
+reports at start (the server log line "N streams at once, 4.78 GiB each ... of 29.0 GiB left after a 9.0 GiB reserve"), measured on a Spark with vision on and
+`PARALLEL=5`: 28.0, 29.0 and 27.3 GiB on three starts. The engine counts 4.78 GiB for each stream at a 262,144-token window. Loading the weights takes about
+81 GiB of memory (the 26.8 GiB NVFP4 n-gram table is read from disk by the host through the page cache, not held on the GPU). The pool is `MemAvailable` after
+the weights load, minus `TENSORFOLD_MEMORY_RESERVE_GIB` (9 GiB), and with `VISION=1` minus 2 GiB kept for the vision path (`TENSORFOLD_VISION_WORKSPACE_MIB`; the tower
+peaks around 0.9-1.7 GiB). It follows the free memory at start (other containers on the machine shrink it), and each GiB less reserve adds a GiB to it.
 `VISION=0` returns the 2 GiB helper workspace to the pool.
 
-**Every stream gets a full window when the server starts.** Five windows take 25.4 GiB, and what is left of the pool is the prompt cache (0.6 to 2.3 GiB on
-the starts above; the v1.1.4 build left 3.7 to 5.2 GiB on the same Spark, and `TF_FLASHNEXT_HEAD_KV=fp8` leaves 2.6 GiB). A `PARALLEL` whose windows do not all fit
-is refused at start: at 262,144 tokens `PARALLEL=6` needs 30.4 GiB and `PARALLEL=8` 40.6 GiB. Within the pool, a request is admitted when its prompt plus its
-reply budget (`max_tokens`) fits beside the others; one that does not fit is refused, not queued.
+**Every stream gets a full window when the server starts.** Five windows take 23.9 GiB, and what is left of the pool is the prompt cache (3.4 to 5.1 GiB
+on the starts above). A `PARALLEL` whose windows do not all fit is refused at start: `PARALLEL=8` at 262,144 tokens needs 38.27 GiB and the server answered
+"the CUDA memory budget leaves 27.22 GiB". Within the pool, a request is admitted when its prompt plus its reply budget (`max_tokens`) fits beside the others;
+one that does not fit is refused, not queued.
 
 **The prompt cache is a cap, not a reservation.** On CUDA the prompt cache takes at most what the weights and the streams leave, so `--prompt-cache-gib` (pass it after the defaults:
-`./start.sh restart --prompt-cache-gib 12`) can only lower the 0.6 to 2.3 GiB above, never raise it: at 5 streams a larger value changes nothing, and it binds only when the leftover is bigger
+`./start.sh restart --prompt-cache-gib 12`) can only lower the 3.4 to 5.1 GiB above, never raise it: at 5 streams a larger value changes nothing, and it binds only when the leftover is bigger
 (a smaller `PARALLEL` or `--context`). `--prompt-cache-over-cap` is refused on CUDA (it lifts a Mac's 70% cap). A larger cache for long multi-turn prompts costs streams or
-window length: `PARALLEL=4` leaves one window's 5.07 GiB more for the cache than five do ([#81](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/81)).
-For more streams, lower `CONTEXT`: eight streams at 131,072 tokens need about 22 GiB (calculated from the sizes above, not run).
+window length: `PARALLEL=4` leaves one window's 4.78 GiB more for the cache than five do ([#81](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/81)).
 
-The window cannot go past 262,144 tokens: TensorFold v1.2.2's Flash Next CUDA engine has no YaRN extension, and `start.sh` refuses a larger `CONTEXT`.
+`PARALLEL=6` at 262,144 tokens (28.7 GiB) fits only with a smaller reserve. We tried `TENSORFOLD_MEMORY_RESERVE_GIB=7`: it started ("28.9 GiB left after a 7.0 GiB
+reserve"), `tools/exact.py`, `toolcheck.py` and `visioncheck.py` passed and decode speed was unchanged, but the prompt cache fell to 0.2 GiB and
+`tools/prompt_reuse.py 30000` failed (a 32k-token follow-up resumed 4.7% of its prompt and prefilled again, 13.8 s). Multi-turn use then re-reads its history on
+every turn, so we left the default at 5. Each GiB the reserve gives up is a GiB of page cache the n-gram table loses, so it is not free. For more streams, lower `CONTEXT` instead: eight streams at 163,840 tokens need about 24 GiB (calculated from the sizes above, not run).
+
+**262,144 is the maximum window on this build.** The Flash Next CUDA engine of TensorFold v1.2.7 has no YaRN
+extension: the family refuses a scaled rope (`families/flashnext/cuda_config.zig`), so the 1,048,576-token window the
+older recipes offered is not reachable here, and `start.sh` stops any larger setting. Restoring it needs engine
+support and a re-measurement (#89).
 
 `prepare.sh` and `start.sh` refuse to run when `MemAvailable` is under 9 GiB (`MEM_FLOOR_GIB`). Keep at least 9 GiB
 free under load. On this machine, exhausting unified memory freezes it.
@@ -306,7 +412,7 @@ free under load. On this machine, exhausting unified memory freezes it.
 Under a long mixed load the stock 1.0.0 engine could log `NV_ERR_NO_MEMORY ... _memdescAllocInternal` in the kernel log while `MemAvailable` stayed above 30 GiB, with no
 failed request. The cause traced to the `cuMemCreate` calls that grow a kept prompt state, and to 64 KiB system-memory pages that must be physically contiguous
 (NVIDIA's driver retries eligible allocations with 4 KiB pages). The opt-in mitigation patch of the 1.0.0 recipe (`TF_FLASHNEXT_SYSTEM_CACHE`, `TF_FLASHNEXT_RING_CACHE`) is not
-part of this patch series, and those settings do not exist in this build. We have not re-run the reproduction load on v1.1.4 or v1.2.2, so we do not know whether the messages still appear.
+part of the v1.1.4 patch series, and those settings do not exist in this build. We have not re-run the reproduction load on v1.1.4, so we do not know whether the messages still appear.
 
 The driver-side workaround is independent of the engine: the nvidia module option `NVreg_RegistryDwords="RmEnableLargePageSizeSysmemDefault=0"` (reboot) makes default
 system-memory allocations start at 4 KiB. In one 45-minute run on kernel 6.17.0-1031-nvidia with the 1.0.0 engine it gave 0 messages against 139, at 58.6 instead of 62.8 tok/s.
@@ -319,41 +425,37 @@ Every setting lives in [`scripts/config.sh`](scripts/config.sh). Override it fro
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PARALLEL` | `5` | requests decoded together. One that would not fit (prompt plus `max_tokens`) is refused |
-| `CONTEXT` | `262144` | prompt + reply window; also the maximum (no YaRN extension on this engine) |
+| `CONTEXT` | `262144` | prompt + reply window; 262,144 is the maximum (this engine has no YaRN extension) |
 | `DRAFTS` | `1` | MTP drafts; `0` passes `--no-drafts` |
 | `TEMPERATURE` / `TOP_P` / `TOP_K` | `1.0` / `0.95` / `20` | default sampling; a request's own values win |
 | `THINKING` | `1` | think before answering; `0` passes `--no-thinking` |
 | `MAX_TOKENS` | `32768` | the reply budget when a request sets none |
-| `VISION` / `VISION_URLS` | `1` / `0` | image and video (`--vision`); `VISION_URLS=1` also accepts public `https://` URLs |
-| `TENSORFOLD_MAX_IMAGES` / `TENSORFOLD_IMAGE_TOKENS` | `50` / `16384` | images a request may carry, and the tokens they share (4,096 at most an image) |
-| `MAX_VIDEOS` | `4` | videos a request (`--vision-max-videos`) |
-| `TENSORFOLD_VIDEO_TOKENS` | `16384` | a request's video token budget |
-| `TENSORFOLD_VISION_WORKSPACE_MIB` | `2048` | kept out of the KV budget for the helper |
+| `VISION` / `VISION_URLS` | `1` / `0` | images (`--vision`); `VISION_URLS=1` also accepts public `https://` URLs |
+| `PDF` | `0` | `1` passes `--vision-pdf`: PDF document parts rendered by the engine's PDFium (32 MiB, 16 pages, needs `VISION=1`) |
+| `VIDEO` | `0` | `1` takes `video_url` parts: puts the image's `libtfvideo.so` (FFmpeg 9.0.2) on the loader's path and passes `--vision-video-tokens` (needs `VISION=1`) |
+| `TENSORFOLD_MAX_IMAGES` / `TENSORFOLD_IMAGE_TOKENS` | `50` / `16384` | image groups a request may carry, and the rows they share (4,096 at most an image); a video's frame groups count among them |
+| `MAX_VIDEOS` | `4` | videos a request (`--vision-max-videos`, 1 to 16), with `VIDEO=1` |
+| `TENSORFOLD_VIDEO_TOKENS` | `16384` | the rows a request's videos share (`--vision-video-tokens`, 64 to 262,144), with `VIDEO=1` |
+| `TENSORFOLD_VISION_WORKSPACE_MIB` | `2048` | kept out of the KV budget for the vision path (the tower and its scratch) |
 | `SERVED_NAME` | `Qwen3.8-Flash-Next` | the model id in `/v1/models` |
 | `PORT` / `HOST` | `8888` / `0.0.0.0` | where the API listens |
-| `KV_DTYPE` | `fp8` | lossy (~98.8% top-1 agreement with bf16, about 1.6x the tokens of bf16 in the same pool). `bf16` is exact. Works with `VISION=1`. Adapted from MiaAI-Lab's GLM recipe patch `0038-glm-kv-fp8` |
-| `TENSORFOLD_MEMORY_RESERVE_GIB` | `9` | kept free when the engine sizes the pool; five full windows need 25.4 GiB of what is left ([KV and memory](#kv-and-memory)). `prepare.sh` and `start.sh` refuse a Spark below this |
+| `KV_DTYPE` | `fp8` | lossy (~98.8% top-1 agreement with bf16, about 1.8x the pool). `bf16` is exact. Works with `VISION=1`. Adapted from MiaAI-Lab's GLM recipe patch `0038-glm-kv-fp8` |
+| `TENSORFOLD_MEMORY_RESERVE_GIB` | `9` | kept free when the engine sizes the pool (9 since the v1.1.4 build's patch 0014; five full windows need 23.9 GiB). `prepare.sh` and `start.sh` refuse a Spark below this |
 | `TF_FLASHNEXT_DRAFTS` | `6` | drafts a round at most |
-| `TF_FLASHNEXT_CONFIDENCE` / `TF_FLASHNEXT_PRODUCT_STREAMS` | `-0.4` / `5` | the draft chain keeps draft j while the running product of the draft probabilities is at least 0.4, for up to 5 streams drafting together (0.5 per draft above that) (patch 0017). Only the number of drafts changes, never a reply. `TF_FLASHNEXT_CONFIDENCE=0.6` restores TensorFold's per-draft rule. Greedy code +4% at 5 streams, +10% at 3, +14% at 1 (measured on v1.1.4) |
-| `TF_FLASHNEXT_SAMPLED_HEADS` / `TF_FLASHNEXT_SAMPLE_CAND` | `1` / `1` | sampled requests join the batched MTP head pass (TensorFold's own since v1.2.2, on by default there), and their top-k candidates are found on the GPU (patch 0008) |
-| `TF_FLASHNEXT_HOST_DRAW_THREADS` | `7` | worker threads for the host-side sampled draws (patch 0011); bit-identical to one thread |
-| `TF_FLASHNEXT_KEEP_LATE` | `1` | a partly rejected draft window does not replay the DeltaNet state: the kept rows wait in a log and the next window applies them (TensorFold's own since v1.2.2, on by default there) |
-| `TF_FLASHNEXT_GATHER_EARLY` / `TF_FLASHNEXT_GATHER_READ` | `1` / `pread` | the n-gram rows of all lanes are gathered in one pass, early, and read with `pread` past the page cache by a thread pool (patches 0010, 0013). Any other value leaves the rows to TensorFold's own reader (buffered `pread` through the page cache; `TF_FLASHNEXT_PLE_IO=mmap` for the mapping) |
-| `TF_FLASHNEXT_DRAFT_AHEAD` / `TF_FLASHNEXT_WARM_AHEAD` | `1` / `1` | read ahead the n-gram rows of the draft tokens during the head step, and of the next prompt chunk during the current one |
-| `TF_FLASHNEXT_PREFILL_TAIL` | `512` | the last two prompt chunks are evened out when the last would be under this many rows |
-| `TF_FLASHNEXT_PROMPT_HC2` / `TF_FLASHNEXT_PROMPT_SHARED_DIRECT` | `1` / `1` | prompt passes run the hyper-connection read-out as two fused kernels instead of five, and the shared expert's rows go straight into the output slot (patch 0014). Bit-identical |
-| `TF_FLASHNEXT_PROMPT_EXPERT_TILE_ROWS` / `TF_FLASHNEXT_HEAD_PIECE` | `256` / `1536` | the routed experts of prompt chunks use the shared-memory row tiles from this many rows; the MTP head takes prompt pieces of this many rows, at most a quarter of the chunk (768 rows at the 3,072-row chunk) (patches 0004, 0014) |
-| `TF_FLASHNEXT_PROMPT_GEMM2` | `1` | the MX128 prompt tile runs with two pipeline stages and two blocks an SM (patch 0015). Same bits, 15-25% faster per call |
-| `TF_FLASHNEXT_SHARED_SIDE` / `TF_FLASHNEXT_GDN_LANES` | `1` / `1` | the shared expert runs on a second stream in decode rounds (TensorFold's own since v1.2.2, on by default there), and a shared round takes every lane's DeltaNet rows in three launches a layer (needs `KEEP_LATE=1`) (patch 0016). Bit-identical |
-| `TF_FLASHNEXT_HEAD_KV` | `bf16` | under `KV_DTYPE=fp8` the MTP head's own cache stays bf16 (patch 0021). `fp8` puts it in fp8 too: 0.24 GiB less a stream, about 9% slower decode at 5 streams |
-| `TF_FLASHNEXT_KV4` | unset | under `KV_DTYPE=fp8`, NVFP4 cache rows (patch 0022): `values` keeps fp8 keys and stores values as E2M1 codes with an E4M3 scale per 16 and a power-of-two row scale (4.41 GiB a stream, a 4.7 GiB prompt cache at 5 streams); `all` stores keys that way too (3.76 GiB). Reads are exact bf16 values. Quality against bf16 KV in `tools/kvq.py`: `values` 3/3 needles to 250K and 20/20 lookups, as fp8; `all` 18/20 lookups. Unset is byte-identical to fp8 |
+| `TF_FLASHNEXT_CONFIDENCE` / `TF_FLASHNEXT_SHARED_DRAFTS` | `-0.4` / `0` | the draft chain keeps draft j while the running product of the draft probabilities is at least 0.4 (v1.2.7's default, the rule the v1.1.4 build's patch 0017 restored). `SHARED_DRAFTS=0` keeps that rule beside other open streams too, where v1.2.7 would switch greedy chains to 0.6 a draft. Only the number of drafts changes, never a reply |
+| `TF_FLASHNEXT_CHUNK` | `3072` | prompt rows a pass (v1.2.7's default 1,536; the v1.1.4 build used 3,072). About 4% faster prefill for 0.8 GiB of the prompt cache; a stream decoding beside a prompt waits up to one pass |
+| `TF_FLASHNEXT_DRAFT_HEAD` | `affine4` | the MTP draft head's rows in 4 bits (a fourth of the bytes a chained draft reads); v1.2.7's default is `bf16`. Drafts are only proposals, so replies do not change |
+| `TF_FLASHNEXT_PROMPT_EXPERT_TILE` | `2` | NVFP4 prompt experts on shared-memory K32 tiles, gate/up and down (`1` gate/up only, `0` off): upstream's opt-in adaptation of the v1.1.4 build's patch 0004/0014 tile |
+| `TF_FLASHNEXT_PROMPT_MX128` | `1024` | prompt passes put MXFP8 projections this many columns wide or more on patch 0004's tile (+7-9% prefill; prompt rows within the exact kernels' rounding bound, not their bits). `0` keeps the exact kernels |
+| `TF_FLASHNEXT_WARM_AHEAD` | `1` | the next prompt chunk's n-gram rows are hinted to the page cache during the current one (upstream opt-in) |
+| `TF_FLASHNEXT_SAMPLED_HEADS` / `TF_FLASHNEXT_KEEP_LATE` / `TF_FLASHNEXT_SHARED_SIDE` / `TF_FLASHNEXT_GDN_LANES` | `1` | v1.2.7's defaults, listed so a `.env` can turn them off: sampled requests in the batched draft pass, pending DeltaNet rows instead of a replay, the shared expert on a side stream, a shared round's DeltaNet steps in one launch (the v1.1.4 build's patches 0007, 0012 and 0016) |
+| `TF_FLASHNEXT_HEAD_KV` | unset | `fp8` keeps the MTP head's own cache in fp8 under `KV_DTYPE=fp8`; unset, it stays bf16 while the stream fits its charge (patch 0003) |
 | `CHECKPOINT` | `nvfp4` | `nvfp4` serves `nvidia/Qwen3.8-Flash-Next-FP4-Local`. `int4` is not supported on this branch. `MODEL_ID` / `MODEL_REVISION` override the model |
 | `MODEL_REVISION` | `b9ce18a6…` | the checkpoint commit this recipe serves |
-| `ABLIT` | `0` | `1` serves the checkpoint with drowzeys's Keys house-qsa abliteration overlay ([above](#ablit-opt-in)); gated, needs `HF_TOKEN`. `2` serves the same abliteration per request beside the stock model, from the stock weights (patches 0018 to 0020, [docs/ablation.md](docs/ablation.md)). Only with `CHECKPOINT=nvfp4` at the pinned revision |
+| `ABLIT` | `0` | `1` serves the checkpoint with drowzeys's Keys house-qsa abliteration overlay ([above](#ablit-opt-in)); gated, needs `HF_TOKEN`. Only with `CHECKPOINT=nvfp4` at the pinned revision |
 
 KV is fp8 (or bf16). The NVIDIA checkpoint's NVFP4 n-gram table (26.8 GiB) is read from disk by the host
 (`TF_FLASHNEXT_GATHER_READ=pread` by default, with read-ahead of the next prompt chunk; `TF_FLASHNEXT_WARM_AHEAD=0` turns that off).
-Prompts are filled in passes of up to 3,072 rows (`TF_FLASHNEXT_CHUNK`, patch 0006; TensorFold's default is 1,536).
 
 ### Thinking and sampling
 
@@ -367,18 +469,20 @@ the model was still thinking.
   `./start.sh restart --thinking-budget 4096`) closes the think block after that many reply tokens and lets the answer start
   (`think_budget` in `zig/src/core/lanes/stream.zig`; the closing is done in the engine's lanes, so drafted and serial replies cut at the same token).
   `reasoning_effort: low` and `enable_thinking: false` are the other levers.
-- **Without a `seed`, a sampled request draws a fresh one** (TensorFold's default, as OpenAI's API does); an explicit `seed` still wins. For reproducible
+- **Without a `seed`, a sampled request draws a fresh one** (TensorFold's default since v1.1.4, as OpenAI's API does); an explicit `seed` still wins. For reproducible
   replies send a `seed`, or start the server with `--prompt-seed` (the engine then derives the seed from the prompt's token ids, so the same prompt gives the same
   sampled reply, and `"draft": false` comparisons are reproducible; `tools/exact.py` and the sampled-exactness checks run that way). `TENSORFOLD_SEED_SALT=<integer>`
   changes every derived seed at once.
-- **`presence_penalty`, `frequency_penalty` and `repetition_penalty` are accepted and have no effect** (the engine does not implement them), and out-of-range
-  sampling values such as `temperature: -1` are not rejected. Use `top_p`, `top_k`, `min_p` and `temperature` to steer repetition.
+- **A nonzero `presence_penalty` or `frequency_penalty` is refused with HTTP 400** ("not supported by backend 'cuda': send 0 or leave them out"): TensorFold
+  v1.2.7 applies them only for other CUDA families and refuses them for Flash Next, where v1.1.4 accepted and ignored them. Clients that send the model
+  card's `presence_penalty: 1.5` must drop it. `repetition_penalty` is still accepted and has no effect, and out-of-range sampling values such as
+  `temperature: -1` are not rejected. Use `top_p`, `top_k`, `min_p` and `temperature` to steer repetition.
 - **A control token in the reasoning ends the turn.** The engine stops on the checkpoint's end tokens (`<|endoftext|>` 248044 and `<|im_end|>` 248046 in its
   `eos_token_id`; the report saw `<|im_start|>` 248045 stop a reply too). If the model writes one while it is still thinking, for example when it quotes it in its analysis, the reply stops right there
   with `finish_reason: "stop"`, empty `content` and a cut `reasoning_content` ([#76](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/76)).
   A client can treat a `stop` with empty `content` as a failed turn and retry with `enable_thinking: false`.
 - **`tool_choice: "required"`, a named function and structured output** are enforced by the engine's grammar library, `libtfgrammar.so` (xgrammar), which the image takes
-  prebuilt from TensorFold's v1.2.2 release archive. With thinking off, `required` still gives the model no room to reason before the call: the grammar forces a call from the
+  prebuilt from TensorFold's v1.2.7 release archive. With thinking off, `required` still gives the model no room to reason before the call: the grammar forces a call from the
   first token, and the function is then picked from that start. With many tools the pick can be less relevant than under `auto`. Keep thinking on, use `auto` with an
   instruction to call a tool, or name the function in `tool_choice`.
 
@@ -390,13 +494,12 @@ the model was still thinking.
 - Refused with HTTP 400: `logprobs: true` / `top_logprobs` (no token probabilities) and `n` other than 1.
 - `"draft": false` serves the request without drafts, the serial reference.
 - Tool calls work, including `tool_choice: "required"`, a named function and Anthropic's `{"type": "any"}`: the reply then always opens a tool call.
-- A conversation's next turn resumes from the kept state of its earlier turns, with images too (built into TensorFold: a changed
-  image resumes only up to its first row). Video prompts are not
-  kept.
+- A conversation's next turn resumes from the kept state of its earlier turns, with images too (built into TensorFold since v1.1.4: a changed
+  image resumes only up to its first row).
 - Structured outputs (`response_format` with a JSON schema, the `guided_*` fields) are enforced with `libtfgrammar.so`; a reply follows the schema. Without the library (a hand-run
   `tensorfold-native` that lacks it) the server answers HTTP 400.
 - When the KV pool is full, a new request is refused. Admission reserves the prompt plus `max_tokens`; the request is
-  not queued. Kept prompt states share that pool: admission frees them first (built into TensorFold), so a request is refused
+  not queued. Kept prompt states share that pool: admission frees them first (built into TensorFold since v1.1.4), so a request is refused
   only when it would not fit with every freeable state gone. A request whose prompt plus `max_tokens` equals `--context` is admitted: the draft rows sit past that
   window (checked with `tools/context_boundary.py`; a streamed request over the limit is refused with an error inside the stream). That admission change was authored by [321sssrt-bit](https://github.com/321sssrt-bit)
   ([issue #1](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Dual-DGX-Sparks-TensorFold/issues/1),
@@ -404,28 +507,32 @@ the model was still thinking.
 
 ## What the patches are
 
-`patches/*.patch` are this recipe's changes to TensorFold v1.2.2 (commit `00e7dddb`), applied with `git apply` in the checkout root by `scripts/prepare.sh`.
-The series was first written for v1.1.4 (commit `eab85828`, which brought TensorFold's own Flash Next CUDA engine) and re-implemented on v1.2.2's code, using
-what v1.2.2 now has itself instead of carrying a second copy. `0007` (sampled requests in the batched draft pass) and `0012` (a partly rejected draft window's
-DeltaNet rows applied by the next window instead of replayed) are part of v1.2.2 and were removed; their numbers stay free. The earlier series for TensorFold
-`db281878` (patches `0001` to `0031`) is retired, since v1.1.4 replaced the engine it targeted. Drafted replies are still checked: a drafted reply matches `"draft": false`.
+`patches/*.patch` are this recipe's changes to TensorFold v1.2.7 (commit `93a2e93e`), applied with `git apply` in the checkout root by `scripts/prepare.sh`.
+Drafted replies are still checked: a drafted reply matches `"draft": false`.
 
 | Patch | What it does |
 | --- | --- |
 | `0001`, `0002` | the vision helper loads NVIDIA's quantized vision tower (MXFP8 attention, NVFP4 MLP and merger decoded to bf16 at load); image budget 16,384 tokens |
-| `0003` | `--kv-cache fp8` for Flash Next on CUDA, which stock v1.2.2 refuses: five full 262,144-token windows fit |
-| `0004`, `0006` | v1.2.2's K32 prompt expert tile on by default at one GPU, from `TF_FLASHNEXT_PROMPT_EXPERT_TILE_ROWS` rows; prefill work: no drain between prompt chunks, a 128x128 MXFP8 prompt tile, 3,072-row chunks |
-| `0005` | the fp8 attention reader keeps the next tile in registers; the MTP head's rows are 4-bit (`TF_FLASHNEXT_DRAFT_HEAD=affine4`) |
-| `0008` to `0011` | GPU top-k candidates for sampled draws, a round-cost model (off), n-gram rows of all lanes gathered at once, host draws on worker threads |
-| `0013` | the n-gram table is read with `pread` past the page cache into a row cache and read ahead; the chunk tail rule |
-| `0014`, `0015` | fused hyper-connection kernels, the shared expert read in place, expert row tiles and MTP head pieces for prompt passes; a two-stage MX128 prompt tile |
-| `0016` | a shared round takes every lane's DeltaNet rows in three launches a layer (the shared expert's second stream, the other half of the v1.1.4 patch, is v1.2.2's own) |
-| `0017` | the draft chain stops on the running product of its draft probabilities (the rule of the earlier build) |
-| `0018` to `0020` | per-request abliteration: identities served from the stock weights, each behind its own model id ([docs/ablation.md](docs/ablation.md)) |
-| `0021` | under `--kv-cache fp8` the MTP head's own cache stays bf16 (part of `0005` on v1.1.4) |
-| `0022` | opt-in NVFP4 KV rows under `--kv-cache fp8`: values only, or keys and values (`TF_FLASHNEXT_KV4`) |
+| `0003` | `--kv-cache fp8` for Flash Next (one rank, contiguous caches): five full 262,144-token windows fit where bf16 fits three. The fp8 attention reader keeps the next tile in registers, and the MTP head's own cache stays bf16 while the stream fits its charge (the v1.1.4 build's 0003 and 0005, rebased onto v1.2.7's paged and lane-batched attention) |
+| `0004` | prompt passes run the MXFP8 projections 1,024 columns or wider on a 128 x 128 tile (64 x 64 for calls of 128 rows or fewer) that folds the block scales into the weights: one fp32 sum over K, 1.4-1.65x the exact kernels, prefill +7-9%. Prompt rows leave the exact kernels' bits (within their rounding bound; a row's bytes never depend on its chunk, so replies stay exact across drafting and batching); `TF_FLASHNEXT_PROMPT_MX128=0` turns it off (the v1.1.4 build's 0006 and 0015) |
+| `0005` | video parts on the CUDA engine: Flash Next offers the template's `<\|video_pad\|>` groups to the server (the sampler and patchifier are TensorFold's `core/qwen_vl/video.zig`, the same the Triton host runs) and the shared media plan reads a group of video rows beside image rows. Nothing decodes a video until `VIDEO=1` puts `libtfvideo.so` on the loader's path (chai-md's [#90](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/pull/90), re-based onto v1.2.7 by MiaAI-Lab) |
 
-Every knob is an environment variable with its default in `scripts/config.sh`; the CHANGELOG lists them with the measured effect of each round.
+The v1.1.4 build carried seventeen patches. v1.2.7 has most of the rest itself, and the recipe sets its switches for them in `scripts/config.sh`:
+
+| v1.1.4 patch | In v1.2.7 |
+| --- | --- |
+| `0004` prompt expert tile | upstream's opt-in K32 staging, adapted from it (`TF_FLASHNEXT_PROMPT_EXPERT_TILE=2`) |
+| `0006`, `0014`, `0015` prefill kernels | the MXFP8 prompt tile is patch `0004` here; the rest is upstream's own prompt work (hyper-connection writeback and normalize in one launch, 256-column normalize, the shared expert's down projection straight into its slot, 128 x 128 BF16 prompt tiles). The fused HC2 read-out, the drain-free chunks and the larger head pieces are not ported (about 1% between them) |
+| `0007` sampled streams in the batched head | upstream, on by default (`TF_FLASHNEXT_SAMPLED_HEADS`) |
+| `0008`, `0011` GPU top-k candidates, host draws | upstream's `fn_row_topk` candidates, on by default (`TF_FLASHNEXT_GPU_TOPK`); the host draw threads are not ported |
+| `0009` round cost model | dropped (it was off) |
+| `0010` n-gram rows of all lanes at once | upstream: a shared pass gathers every lane's rows on a thread |
+| `0012` DeltaNet rows kept pending | upstream, on by default (`TF_FLASHNEXT_KEEP_LATE`) |
+| `0013` `pread` n-gram reader, read-ahead, chunk tail | upstream's positional reader is the Linux default (`TF_FLASHNEXT_PLE_IO`) and `TF_FLASHNEXT_WARM_AHEAD` its read-ahead; the draft-token read-ahead and the tail rule are not ported |
+| `0016` shared expert side stream, lane-batched DeltaNet | upstream, on by default (`TF_FLASHNEXT_SHARED_SIDE`, `TF_FLASHNEXT_GDN_LANES`) |
+| `0017` running-product stop rule | upstream's default `TF_FLASHNEXT_CONFIDENCE=-0.4`; `TF_FLASHNEXT_SHARED_DRAFTS=0` keeps it beside other streams |
+
+Whether the pieces that were not ported still matter is a measurement of the v1.2.7 build, not yet made.
 
 ## Checks
 
@@ -436,9 +543,7 @@ Every knob is an environment variable with its default in `scripts/config.sh`; t
 | `tools/exact.py` | greedy replies: drafted, `"draft": false`, and concurrent, must match |
 | `tools/toolcheck.py` | a tool call whose array argument comes back as a JSON array |
 | `tools/needle.py` | a passphrase in a ~200,000-token prompt |
-| `tools/kvq.py` | KV format quality: the same greedy replies, needles (128K, 250K) and key lookups (34K, 136K) against a bf16-KV run |
 | `tools/prompt_reuse.py` | a resumed prompt matches a fresh one |
-| `tools/verify_ablate.py` | each model id (stock and identities) resumes only its own kept state, and its resumed greedy reply matches the cold one |
 | `tools/bench.py` | prefill at 8k-128k and a short decode |
 | `tools/bench_streams.py` | decode at 1 to 5 concurrent requests (prose and code, with TTFT) and prefill 4k to 128k, median of 3 |
 | `tools/context_boundary.py --context N` | a prompt plus reply that fills `--context` succeeds; one token over is refused (HTTP 400, or an error in the stream). Authored by [321sssrt-bit](https://github.com/321sssrt-bit) |
@@ -448,11 +553,9 @@ Every knob is an environment variable with its default in `scripts/config.sh`; t
 ```
 start.sh      set up (first run) and start the server
 stop.sh       stop it
-restart.sh    the lab's restart: the small services paused while the server loads
-scripts/      prepare.sh, config.sh, publish-image.sh, banner.sh, ablit_view.py
-patches/      this recipe's changes, applied onto TensorFold v1.2.2 at TF_REF
+scripts/      prepare.sh, config.sh, harden.sh, publish-image.sh, banner.sh, ablit_view.py
+patches/      this recipe's changes, applied onto TensorFold v1.2.7 at TF_REF
 tools/        checks
-docs/         per-request abliteration (ablation.md) and older notes
 .github/      issue and pull request templates, GitHub Sponsors
 CREDITS.md    who and what this builds on
 CHANGELOG.md  upgrade notes
@@ -476,21 +579,22 @@ covers this repository's scripts only.
 ## Credits
 
 - **Engine:** [TensorFold](https://github.com/ashhart/TensorFold) and its Zig engine (`tensorfold-native`, release
-  [v1.2.2](https://github.com/ashhart/TensorFold/releases/tag/v1.2.2)) by Ash Hart ([ashhart](https://github.com/ashhart)) and the
+  [v1.2.7](https://github.com/ashhart/TensorFold/releases/tag/v1.2.7)) by Ash Hart ([ashhart](https://github.com/ashhart)) and the
   [TensorFold contributors](https://github.com/ashhart/TensorFold/graphs/contributors). The Flash Next CUDA engine this recipe builds on is TensorFold's own, written by Ash Hart and the TensorFold contributors.
 - **Zig CUDA serving path and CUDA family registry:** Jürgen Schmied ([jschmied](https://github.com/jschmied)), in
   [TensorFold PR #443](https://github.com/ashhart/TensorFold/pull/443)
   (commit [`59e77e8`](https://github.com/ashhart/TensorFold/commit/59e77e8f4b875ce0e863a8c896fc8e424bc539ac)).
-- **The patches in `patches/`:** 0001 to 0017 written by MiaAI-Lab (Mia's AI Lab), MIT License, and ported to v1.2.2 with the rest of the series. They modify
-  TensorFold's own Flash Next CUDA engine (code by Ash Hart and the TensorFold contributors, under TensorFold's licenses). The list, patch by patch, with where each
-  idea comes from, is in [`CREDITS.md`](CREDITS.md): the vision tower (0001, 0002), fp8 KV (0003, 0005, 0021; the format adapted from MiaAI-Lab's GLM recipe patch 0038), prompt
-  expert tile and prefill (0004, 0006, 0014, 0015; the K32 expert tile itself went into TensorFold v1.2.2 from MiaAI-Lab), sampled streams (0008 to 0011; the GPU top-k idea
-  from MiaAI-Lab's DeepSeek recipe), `pread` n-gram reader and decode (0013, 0016, 0017; they carry forward parts of the earlier db281878 series, whose NVIDIA FP4 port is by
-  MiaAI-Lab from the TensorFold Contributors' Python implementation of the same formats). Per-request identities (0018 to 0020): [docs/ablation.md](docs/ablation.md).
-  0007 (sampled streams in the batched head) and 0012 (the DeltaNet rollback folded into the next window) are part of TensorFold v1.2.2; its version of 0012, together with
-  the shared expert's side stream of 0016, is by [Arminova](https://github.com/Arminova) (TensorFold #1763).
-- **Earlier db281878 series** (on `main`): free after drain and admission reclaim (patch 0029) and image prompts in the prompt cache (patch 0030) by [tempeste](https://github.com/tempeste), built
-  into TensorFold since v1.1.4; sliced fills one at a time (patch 0021) by [BadAd84](https://github.com/BadAd84) (PR #53).
+- **The 4 patches in `patches/` (0001 to 0004):** written by MiaAI-Lab (Mia's AI Lab), MIT License. They modify
+  TensorFold's own Flash Next CUDA engine (code by Ash Hart and the TensorFold contributors, under TensorFold's licenses). The list, with where each
+  idea comes from, is in [`CREDITS.md`](CREDITS.md): the vision tower (0001, 0002), fp8 KV (0003; the format adapted from MiaAI-Lab's GLM recipe patch 0038)
+  and the MXFP8 prompt tile (0004).
+- **Patch 0005 (video parts):** by [chai-md](https://github.com/chai-md) in
+  [#90](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/pull/90), re-based onto TensorFold v1.2.7 by MiaAI-Lab and
+  MIT License like the rest of `patches/`.
+  Several of the v1.1.4 build's patches (0004 to 0017) are now part of TensorFold v1.2.7 in upstream's own form; upstream credits MiaAI-Lab for the K32
+  expert staging it adapted from patch 0014.
+- **Earlier db281878 series** (on `main`): free after drain and admission reclaim (patch 0029) and image prompts in the prompt cache (patch 0030) by [tempeste](https://github.com/tempeste), now built
+  into TensorFold v1.1.4; sliced fills one at a time (patch 0021) by [BadAd84](https://github.com/BadAd84) (PR #53).
 - **Model:** [Qwen3.8 Flash Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by the Qwen team (Alibaba).
 - **Default checkpoint:** NVIDIA's [FP4 QAD export](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local) (Model Optimizer).
 - **INT4 checkpoint** (served by the db281878 recipe on `main`, not by this branch): [azampatti](https://huggingface.co/azampatti)'s

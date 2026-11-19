@@ -1,5 +1,5 @@
 diff --git a/zig/kernels/cuda/flashnext_ablate.cuh b/zig/kernels/cuda/flashnext_ablate.cuh
-index 68a2a5483..83c26bdde 100644
+index 68a2a54..83c26bd 100644
 --- a/zig/kernels/cuda/flashnext_ablate.cuh
 +++ b/zig/kernels/cuda/flashnext_ablate.cuh
 @@ -3,12 +3,48 @@ extern "C" __global__ void __launch_bounds__(256) fn_ablate_rows(float* __restri
@@ -53,7 +53,7 @@ index 68a2a5483..83c26bdde 100644
      const float* __restrict__ lam = R + k * d + kind * k;
      float* row = y + static_cast<long long>(blockIdx.x) * row_stride;
 diff --git a/zig/src/families/flashnext/cuda_ablate.zig b/zig/src/families/flashnext/cuda_ablate.zig
-index 005247c94..b116692b6 100644
+index 005247c..b116692 100644
 --- a/zig/src/families/flashnext/cuda_ablate.zig
 +++ b/zig/src/families/flashnext/cuda_ablate.zig
 @@ -8,17 +8,24 @@ const zs = @import("cuda_zero_slice.zig");
@@ -314,7 +314,7 @@ index 005247c94..b116692b6 100644
 +    try std.testing.expectError(error.AblateDirectionsNotOrthonormal, Ablation.load(&s, 1, &block));
 +}
 diff --git a/zig/src/families/flashnext/cuda_lanes_explain.zig b/zig/src/families/flashnext/cuda_lanes_explain.zig
-index 990fcf277..95f0fbdfc 100644
+index 9fa201a..4f0c23d 100644
 --- a/zig/src/families/flashnext/cuda_lanes_explain.zig
 +++ b/zig/src/families/flashnext/cuda_lanes_explain.zig
 @@ -12,6 +12,7 @@ pub fn open(err: anyerror) ?[]const u8 {
@@ -325,7 +325,7 @@ index 990fcf277..95f0fbdfc 100644
          else => null,
      };
  }
-@@ -35,6 +36,7 @@ pub fn explain(err: anyerror) ?[]const u8 {
+@@ -36,6 +37,7 @@ pub fn explain(err: anyerror) ?[]const u8 {
          error.IdentitiesMalformed, error.IdentitiesDuplicate, error.IdentitiesTooMany => "TENSORFOLD_IDENTITIES takes id=path entries apart by commas or newlines, each id once, at most 32",
          error.BadAblateScale => "TENSORFOLD_ABLATE_SCALE takes a finite number (1: the file's strengths)",
          error.AblateDirectionsShape, error.AblateDirectionsNotOrthonormal, error.AblateFileMissesDirections, error.AblateFileMissesLambdas, error.AblateFileMissesFirstLayer, error.AblateLambdaShape, error.AblateFirstLayerShape => "an identity's file takes `directions` [k, 2560] fp32 orthonormal rows (k <= 4), `lam_attn` and `lam_shared` [k] fp32 and `first_layer` [1] int64 under 48; the log names the file",

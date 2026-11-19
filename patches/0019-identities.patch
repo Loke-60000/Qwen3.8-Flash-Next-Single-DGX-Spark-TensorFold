@@ -1,5 +1,5 @@
 diff --git a/zig/kernels/cuda/flashnext_ablate.cuh b/zig/kernels/cuda/flashnext_ablate.cuh
-index 955056034..68a2a5483 100644
+index 9550560..68a2a54 100644
 --- a/zig/kernels/cuda/flashnext_ablate.cuh
 +++ b/zig/kernels/cuda/flashnext_ablate.cuh
 @@ -1,9 +1,16 @@
@@ -24,7 +24,7 @@ index 955056034..68a2a5483 100644
      // y[r] is the slices' sum; the dots reduce in a fixed order (columns, warp tree, warps), whatever the batch
      float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
-index b21a6a47f..0dba45727 100644
+index bff4ca6..ea1d915 100644
 --- a/zig/src/core/engine_api.zig
 +++ b/zig/src/core/engine_api.zig
 @@ -1,6 +1,8 @@
@@ -36,7 +36,7 @@ index b21a6a47f..0dba45727 100644
  const Allocator = std.mem.Allocator;
  pub const profile = @import("profile");
  pub const tfvideo = @import("tfvideo.zig");
-@@ -118,20 +120,21 @@ pub const Request = struct {
+@@ -89,8 +91,8 @@ pub const Request = struct {
      images: []const Image = &.{},
      /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
      cache_key: []const u32 = &.{},
@@ -47,7 +47,8 @@ index b21a6a47f..0dba45727 100644
  
      /// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
      pub fn cacheKey(r: *const Request) []const u32 {
-         return if (r.cache_key.len > 0) r.cache_key else r.prompt;
+@@ -102,12 +104,13 @@ pub const Request = struct {
+         return r.embedding != null or r.readout != null;
      }
  
 -    /// Asks for the abliteration, its states keyed apart: it never resumes a stock request's, nor a stock request its.
@@ -64,7 +65,7 @@ index b21a6a47f..0dba45727 100644
      }
  
      /// The prompt length its kept states count as: its own, or for a warm pass the request whose reply it prefills.
-@@ -240,8 +243,8 @@ pub const Info = struct {
+@@ -239,8 +242,8 @@ pub const Info = struct {
      slide_conversations: bool = false,
      /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.
      admit: ?Admit = null,
@@ -76,7 +77,7 @@ index b21a6a47f..0dba45727 100644
      ledger: ?Ledger = null,
  
 diff --git a/zig/src/core/lane_host_identity_test.zig b/zig/src/core/lane_host_identity_test.zig
-index d37ccf53c..a8d695c45 100644
+index d37ccf5..a8d695c 100644
 --- a/zig/src/core/lane_host_identity_test.zig
 +++ b/zig/src/core/lane_host_identity_test.zig
 @@ -1,4 +1,4 @@
@@ -191,10 +192,10 @@ index d37ccf53c..a8d695c45 100644
 +    try std.testing.expectError(error.IdentitiesTooMany, identities.list(long[0..at], null, null, &out));
  }
 diff --git a/zig/src/core/lane_stream.zig b/zig/src/core/lane_stream.zig
-index 68e6451a1..5df99cae1 100644
+index f62e413..491dc38 100644
 --- a/zig/src/core/lane_stream.zig
 +++ b/zig/src/core/lane_stream.zig
-@@ -69,7 +69,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
+@@ -70,7 +70,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
          .decode_spans = h.spans(r),
          .decide = r.decide,
          .untaught = r.untaught,
@@ -205,7 +206,7 @@ index 68e6451a1..5df99cae1 100644
      }) catch {
 diff --git a/zig/src/core/lanes/identities.zig b/zig/src/core/lanes/identities.zig
 new file mode 100644
-index 000000000..82e75f80e
+index 0000000..82e75f8
 --- /dev/null
 +++ b/zig/src/core/lanes/identities.zig
 @@ -0,0 +1,47 @@
@@ -257,7 +258,7 @@ index 000000000..82e75f80e
 +    return if (std.c.getenv(name)) |v| std.mem.span(v) else null;
 +}
 diff --git a/zig/src/core/lanes/lanes.zig b/zig/src/core/lanes/lanes.zig
-index 003fcbcaa..7e038e253 100644
+index 75ebc70..34e0eaa 100644
 --- a/zig/src/core/lanes/lanes.zig
 +++ b/zig/src/core/lanes/lanes.zig
 @@ -2,6 +2,7 @@
@@ -269,10 +270,10 @@ index 003fcbcaa..7e038e253 100644
  pub const table = @import("table.zig");
  pub const allocate = @import("allocate.zig");
 diff --git a/zig/src/core/lanes/stream.zig b/zig/src/core/lanes/stream.zig
-index 754784c91..84595850d 100644
+index 4b159c3..2ea5c70 100644
 --- a/zig/src/core/lanes/stream.zig
 +++ b/zig/src/core/lanes/stream.zig
-@@ -138,7 +138,7 @@ pub const Spec = struct {
+@@ -141,7 +141,7 @@ pub const Spec = struct {
      reuse: Reuse = .{},
      decide: ?u32 = null, // the prompt row where living lessons decide whether they act on the reply
      untaught: bool = false, // no learned neuron acts on its rows: the model as shipped (Request.untaught)
@@ -281,7 +282,7 @@ index 754784c91..84595850d 100644
      logprobs: ?u8 = null, // the target's log probabilities for each committed token, with this many best tokens
      prompt_logprobs: ?u8 = null, // and for each prompt token after the first, with ranks (the prompt pass starts at 0)
      grammar: ?*grammar.Constraint = null, // structured output: the reply stays in it (the creator frees it)
-@@ -184,7 +184,7 @@ pub const Stream = struct {
+@@ -190,7 +190,7 @@ pub const Stream = struct {
      decode_spans: []const [2]u32 = &.{},
      decide: ?u32 = null,
      untaught: bool = false,
@@ -290,7 +291,7 @@ index 754784c91..84595850d 100644
      images: []const Image = &.{},
      key: []const u32 = &.{},
      cached: u32 = 0, // prompt tokens the backend restored from `reuse` (its prompt pass started there)
-@@ -272,7 +272,7 @@ pub const Stream = struct {
+@@ -279,7 +279,7 @@ pub const Stream = struct {
              .fill_at = .init(if (spec.reuse.saved != null) spec.reuse.at else 0), // a kept prefix is filled from the start
              .decide = spec.decide,
              .untaught = spec.untaught,
@@ -300,7 +301,7 @@ index 754784c91..84595850d 100644
              .prompt_logprobs = spec.prompt_logprobs,
              .grammar = spec.grammar,
 diff --git a/zig/src/families/flashnext/cuda_ablate.zig b/zig/src/families/flashnext/cuda_ablate.zig
-index d077e06f3..005247c94 100644
+index d077e06..005247c 100644
 --- a/zig/src/families/flashnext/cuda_ablate.zig
 +++ b/zig/src/families/flashnext/cuda_ablate.zig
 @@ -1,7 +1,8 @@
@@ -558,23 +559,23 @@ index d077e06f3..005247c94 100644
 +    try std.testing.expect(!asked(&P{ .lanes = &.{}, .seq = .{ .identity = 3 } }, &a, 40, .attn));
  }
 diff --git a/zig/src/families/flashnext/cuda_batch_kernels.zig b/zig/src/families/flashnext/cuda_batch_kernels.zig
-index 2bcb7b502..c51b37d32 100644
+index 2c944a4..8e71d2e 100644
 --- a/zig/src/families/flashnext/cuda_batch_kernels.zig
 +++ b/zig/src/families/flashnext/cuda_batch_kernels.zig
-@@ -54,7 +54,7 @@ pub const Kernels = struct {
+@@ -94,7 +94,7 @@ pub const Kernels = struct {
      /// Each sparse row's top blocks (attention._select / _select_tiles), native.
      select: cuda.Function,
      select_lanes: cuda.Function,
 -    ablate: cuda.Function, // an asking row's writer outputs corrected (cuda_ablate.zig)
 +    ablate: cuda.Function, // writer outputs corrected by each row's identity (cuda_ablate.zig)
  
-     pub fn load(d: *const cuda.Driver, world: usize) !Kernels {
+     pub fn load(d: *const cuda.Driver) !Kernels {
          if (!cuda.kernels.available) return error.BuiltWithoutKernels;
 diff --git a/zig/src/families/flashnext/cuda_batch_state.zig b/zig/src/families/flashnext/cuda_batch_state.zig
-index c96256c9a..8ddedca12 100644
+index e1ca183..e58eef8 100644
 --- a/zig/src/families/flashnext/cuda_batch_state.zig
 +++ b/zig/src/families/flashnext/cuda_batch_state.zig
-@@ -303,7 +303,7 @@ pub const Scratch = struct {
+@@ -321,7 +321,7 @@ pub const Scratch = struct {
      hc_part_bytes: usize = 0,
      inv: u64 = 0,
      dummy: u64 = 0,
@@ -583,16 +584,16 @@ index c96256c9a..8ddedca12 100644
      /// Pinned host copies of what a pass uploads (ids, positions, n-gram rows and sums), owned until the copies land.
      host: ?cuda.HostBuffer = null,
      /// The uploads from `host` and the event recorded after a pass's last one: the next pass waits before writing it.
-@@ -507,7 +507,7 @@ pub const SeqState = struct {
-     scores: u64,
-     /// The attention caches' pages (pt 0: kc, vc, ikc and pooled are contiguous rows).
+@@ -534,7 +534,7 @@ pub const SeqState = struct {
      pg: @import("cuda_glue.zig").Pg = .{},
+     /// The format of kc and vc (cuda_kv.zig): bf16 rows, or --kv-cache fp8's codes and scales.
+     kv: @import("cuda_kv.zig").Kv = .bf16,
 -    ablate: bool = false, // the request asked for the abliteration (cuda_ablate.zig)
 +    identity: u8 = 0, // the identity its request named, 0 none (cuda_ablate.zig)
  };
  
- /// The block scores' row stride for a cache of `cap` tokens: its blocks rounded up to 16 (the captured _scores').
-@@ -536,7 +536,7 @@ pub const Model = struct {
+ pub const scoreStride = sizes.scoreStride;
+@@ -556,7 +556,7 @@ pub const Model = struct {
      ngram: *const ple.Ngram,
      /// The engine's own adds to the MoE outputs: a taught folder's pockets (null: none).
      pocket: ?MoeAdd = null,
@@ -602,10 +603,10 @@ index c96256c9a..8ddedca12 100644
  
  /// The rows' n-gram embeddings, gathered on a host thread while the GPU embeds and runs layer 0.
 diff --git a/zig/src/families/flashnext/cuda_disk.zig b/zig/src/families/flashnext/cuda_disk.zig
-index 2968847ca..9a0ddf67c 100644
+index 0983534..aa1b5d7 100644
 --- a/zig/src/families/flashnext/cuda_disk.zig
 +++ b/zig/src/families/flashnext/cuda_disk.zig
-@@ -137,7 +137,7 @@ pub fn Kept(comptime F: type) type {
+@@ -144,7 +144,7 @@ pub fn Kept(comptime F: type) type {
              return .{ .hash = std.hash.Wyhash.hash(0x666e, bytes), .rate = @as(f64, @floatFromInt(toks.len)) / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
          }
  
@@ -615,10 +616,10 @@ index 2968847ca..9a0ddf67c 100644
              return .{ @intFromBool(of(target).head != null), if (of(target).engine.abl) |a| a.hash else 0 };
          }
 diff --git a/zig/src/families/flashnext/cuda_lanes.zig b/zig/src/families/flashnext/cuda_lanes.zig
-index 03089ed45..6b4b879c9 100644
+index d4533a1..e4ea234 100644
 --- a/zig/src/families/flashnext/cuda_lanes.zig
 +++ b/zig/src/families/flashnext/cuda_lanes.zig
-@@ -93,7 +93,7 @@ pub fn Namespace(comptime Tri: type) type {
+@@ -98,7 +98,7 @@ pub fn Namespace(comptime Tri: type) type {
              follow: ?*const fn (*anyopaque) anyerror!void = null,
              /// TF_FLASHNEXT_KV_PAGES: the streams beside the first take pages of one pool (null: their own caches).
              layout: ?@import("core").kv_pool.Layout = null,
@@ -627,7 +628,7 @@ index 03089ed45..6b4b879c9 100644
          };
  
          /// Device bytes of the checkpoint: the n-gram tables stay mapped, the MTP head counts; 0 if unread.
-@@ -299,7 +299,7 @@ pub fn Namespace(comptime Tri: type) type {
+@@ -307,7 +307,7 @@ pub fn Namespace(comptime Tri: type) type {
                  self.kv.opened(from);
                  const l = gop.value_ptr;
                  l.seq.untaught = s.untaught;
@@ -637,22 +638,22 @@ index 03089ed45..6b4b879c9 100644
                      dropLane(self, l);
                      self.lanes.removeByPtr(gop.key_ptr);
 diff --git a/zig/src/families/flashnext/cuda_lanes_explain.zig b/zig/src/families/flashnext/cuda_lanes_explain.zig
-index e679d9ab1..990fcf277 100644
+index 4abd6e8..9fa201a 100644
 --- a/zig/src/families/flashnext/cuda_lanes_explain.zig
 +++ b/zig/src/families/flashnext/cuda_lanes_explain.zig
 @@ -8,7 +8,8 @@ pub fn open(err: anyerror) ?[]const u8 {
          error.FlashNextRanksOnCapturedGlue => "--tp 2 runs Flash Next's own glue, not a captured set: set TENSORFOLD_CUDA_KERNELS=native, or serve on one GPU",
          error.BadFlashNextKvPages, error.BadFlashNextPageTest, error.FlashNextPagesUnsupported, error.UnsupportedCheckpoint => explain(err),
-         error.UnsupportedLearningFormat, error.TrainingOnCapturedGlue, error.Fp8KvUnsupported => explain(err),
+         error.UnsupportedLearningFormat, error.TrainingOnCapturedGlue => explain(err),
 -        error.AblateNeedsOneRank, error.AblateDirectionsShape, error.AblateDirectionsNotOrthonormal => explain(err),
 +        error.IdentitiesNeedOneRank, error.IdentitiesMalformed, error.IdentitiesDuplicate, error.IdentitiesTooMany => explain(err),
 +        error.AblateDirectionsShape, error.AblateDirectionsNotOrthonormal => explain(err),
          error.AblateFileMissesDirections, error.AblateFileMissesLambdas, error.AblateFileMissesFirstLayer => explain(err),
          error.AblateLambdaShape, error.AblateFirstLayerShape, error.BadAblateScale => explain(err),
          else => null,
-@@ -30,9 +31,10 @@ pub fn explain(err: anyerror) ?[]const u8 {
-         error.PocketOfAnotherSize => "a lesson's pocket is wider than the layer's loaded one: restart the server on the folder",
+@@ -31,9 +32,10 @@ pub fn explain(err: anyerror) ?[]const u8 {
          error.UnsupportedLearningFormat => "--slide requires the affine 4-bit group-32 single-rank Flash Next checkpoint",
+         error.Fp8KvUnsupported => "--kv-cache fp8 runs on Flash Next's own glue on one rank: serve it without --tp, --slide or TENSORFOLD_CUDA_KERNELS, or without --kv-cache fp8",
          error.TrainingOnCapturedGlue => "--slide trains on Flash Next's own glue: serve it without TENSORFOLD_CUDA_KERNELS",
 -        error.AblateNeedsOneRank => "TENSORFOLD_ABLATE applies on one rank: serve it without --tp, or unset TENSORFOLD_ABLATE",
 +        error.IdentitiesNeedOneRank => "TENSORFOLD_IDENTITIES (or TENSORFOLD_ABLATE_MODEL) applies on one rank: serve them without --tp, or unset them",
@@ -664,19 +665,19 @@ index e679d9ab1..990fcf277 100644
  }
  
 diff --git a/zig/src/families/flashnext/cuda_lanes_load.zig b/zig/src/families/flashnext/cuda_lanes_load.zig
-index 6bb4185ef..9f64a369b 100644
+index 1eba11f..5def2a2 100644
 --- a/zig/src/families/flashnext/cuda_lanes_load.zig
 +++ b/zig/src/families/flashnext/cuda_lanes_load.zig
-@@ -16,7 +16,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
+@@ -18,7 +18,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
      if (o.segments != 1) return error.UnsupportedOption;
      if (o.tp != 1 and o.tp != 2) return error.FlashNextRanksOverTwo;
      if (o.rank >= o.tp) return error.BadRank;
 -    try @import("cuda_ablate.zig").check(o.tp); // TENSORFOLD_ABLATE, one rank
 +    try @import("cuda_ablate.zig").check(o.tp); // TENSORFOLD_IDENTITIES, one rank
-     // refused before the stream, the glue or a captured set loads
-     const chunk = try @import("cuda_chunk.zig").soloRows(try prompt.chunkRows()); // the largest pass, solo or not
+     // refused before the stream, the glue or a captured set loads: the largest pass, wider at --parallel 1 on one rank
+     const chunk = try @import("cuda_chunk.zig").soloRows(try prompt.chunkRows(), o.one_stream and o.tp == 1);
      _ = try @import("cuda_modelopt_threads.zig").configured(); // TF_FLASHNEXT_LOAD_THREADS, refused before any load
-@@ -126,7 +126,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
+@@ -135,7 +135,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
          .target = own,
          .own_glue = own.set == null,
          .follow = if (o.rank != 0) F.follow else null,
@@ -686,65 +687,65 @@ index 6bb4185ef..9f64a369b 100644
  }
  
 diff --git a/zig/src/families/flashnext/cuda_prompt.zig b/zig/src/families/flashnext/cuda_prompt.zig
-index a5ac62c86..0035d6b1b 100644
+index 2570970..a89b334 100644
 --- a/zig/src/families/flashnext/cuda_prompt.zig
 +++ b/zig/src/families/flashnext/cuda_prompt.zig
-@@ -159,7 +159,7 @@ pub const Engine = struct {
+@@ -137,7 +137,7 @@ pub const Engine = struct {
      taught_rows: u64 = 0,
-     /// The attention caches' format of every sequence and head cache this engine makes (--kv-cache), set at load.
-     kv: Kv = .bf16,
+     /// The attention caches' format of every sequence this engine makes (--kv-cache); set before the first newSeq.
+     kv: kv_format.Kv = .bf16,
 -    abl: ?@import("cuda_ablate.zig").Ablation = null, // TENSORFOLD_ABLATE's directions, on the rows that ask
 +    abl: ?@import("cuda_ablate.zig").Ablation = null, // TENSORFOLD_IDENTITIES' directions, on the rows naming one
+ 
      pub fn init(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, model_dir: []const u8) !*Engine {
          return initRank(gpa, io, driver, stream, model_dir, 1, 0);
-     }
-@@ -513,13 +513,13 @@ pub const Seq = struct {
+@@ -504,13 +504,13 @@ pub const Seq = struct {
      cap: usize,
      /// The model as shipped: no learned neuron acts on its rows (a lesson writer's and its judge's reads).
      untaught: bool = false,
 -    ablate: bool = false, // its request asked for the abliteration (cuda_ablate.zig)
 +    identity: u8 = 0, // the identity its request named, 0 none (cuda_ablate.zig)
      /// The format of kc and vc (the engine's --kv-cache).
-     kv: Kv = .bf16,
+     kv: kv_format.Kv = .bf16,
  
      /// The caches a batched pass reads and leaves; `scores` the engine's block scores (Engine.reserveScores).
      pub fn view(s: *Seq, scores: u64) batch.SeqState {
--        return .{ .media = if (s.media) |*m| m.view() else null, .conv = s.conv, .state = s.state, .kc = s.kc, .vc = s.vc, .ikc = s.ikc, .pooled = s.pooled, .tail = s.tail, .history = &s.history, .cap = s.cap, .scores = scores, .pg = s.pg(), .ablate = s.ablate };
-+        return .{ .media = if (s.media) |*m| m.view() else null, .conv = s.conv, .state = s.state, .kc = s.kc, .vc = s.vc, .ikc = s.ikc, .pooled = s.pooled, .tail = s.tail, .history = &s.history, .cap = s.cap, .scores = scores, .pg = s.pg(), .identity = s.identity };
+-        return .{ .gen = s.gen, .media = if (s.media) |*m| m.view() else null, .conv = s.conv, .state = s.state, .kc = s.kc, .vc = s.vc, .ikc = s.ikc, .pooled = s.pooled, .tail = s.tail, .history = &s.history, .cap = s.cap, .scores = scores, .pg = s.pg(), .kv = s.kv, .ablate = s.ablate };
++        return .{ .gen = s.gen, .media = if (s.media) |*m| m.view() else null, .conv = s.conv, .state = s.state, .kc = s.kc, .vc = s.vc, .ikc = s.ikc, .pooled = s.pooled, .tail = s.tail, .history = &s.history, .cap = s.cap, .scores = scores, .pg = s.pg(), .kv = s.kv, .identity = s.identity };
      }
  
      /// The attention kernels' page argument (zero: contiguous caches).
 diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
-index 5bf1d432f..8c39d9fa6 100644
+index b1396cd..1fd625c 100644
 --- a/zig/src/native/cuda.zig
 +++ b/zig/src/native/cuda.zig
-@@ -484,7 +484,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
-         .admit = admit,
-         .ledger = @import("cuda_ledger.zig").info(if (h.kv_plan) |*p| p else null),
+@@ -466,7 +466,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
          .slide_conversations = conversations,
+         .readouts = readouts,
+         .text_generation = readouts == null, // a readout engine answers its readouts only (Clef's /v1/systemone)
 -        .ablate = @hasField(@TypeOf(loaded), "ablate") and loaded.ablate,
 +        .identities = @hasField(@TypeOf(loaded), "identities") and loaded.identities,
-     }, .{ .ctx = loaded.ctx, .text = F.explain });
+     }), .{ .ctx = loaded.ctx, .text = F.explain });
      opened = true;
-     kv_pages.warnCapacity(cache_capacity, o.keep == 0 or o.prompt_cache_gib == 0, std.log);
+     kv_pages.warnCapacity(cache_capacity, o.keep == 0 or o.prompt_cache_gib == 0 or share, if (paged) |p| p.taken else 0, std.log); // TF_KV_SHARE: no copied rows
 diff --git a/zig/src/server/chat.zig b/zig/src/server/chat.zig
-index a516a13f2..da16f60d7 100644
+index f679802..58f9db0 100644
 --- a/zig/src/server/chat.zig
 +++ b/zig/src/server/chat.zig
-@@ -180,7 +180,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
+@@ -192,7 +192,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
          .images = rendered.images,
          .cache_key = rendered.cache_key,
      };
 -    if (@import("server.zig").asksAblation(srv.config, f)) try request.ablated(a);
 +    try request.named(a, @import("server.zig").identityOf(srv.config, f));
      try srv.checkFeatures(cx, f, input.tools.len > 0, reasoning, rendered.ids, input.tools, &request);
+     server_mod.nameStructure(input.format, &request);
      errdefer srv.release(false, request);
-     if (reasoning) {
 diff --git a/zig/src/server/serve.zig b/zig/src/server/serve.zig
-index f661c4d56..cad0a6f94 100644
+index 9970af8..0d10756 100644
 --- a/zig/src/server/serve.zig
 +++ b/zig/src/server/serve.zig
-@@ -145,14 +145,21 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
+@@ -154,14 +154,21 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
              if (std.mem.eql(u8, seen, id)) break;
          } else ids.append(a, id) catch return 1;
      };
@@ -773,16 +774,16 @@ index f661c4d56..cad0a6f94 100644
      var bad_id: []const u8 = "";
      const backgrounds = namedBackgrounds(a, args.name_priority, ids.items, &bad_id) catch |err| switch (err) {
          error.OutOfMemory => return 1,
-@@ -207,7 +214,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
-         .prompt_seed = args.prompt_seed,
+@@ -219,7 +226,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
          .sse_keepalive_s = keepalive_s,
          .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
+         .phase_metrics = if (env(s, "TENSORFOLD_PHASE_METRICS")) |v| std.mem.eql(u8, v, "1") else false,
 -        .ablate_model = if (ablate_model.len > 0) ablate_model else null,
 +        .identities = identity_ids[0..listed.len],
          .spark_stats = spark_stats,
          .dashboard = args.dashboard,
          .compact_at = if (args.compact_auto) .{ .auto = {} } else if (args.compact_fraction) |f| .{ .fraction = f } else null,
-@@ -241,10 +248,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
+@@ -255,10 +262,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
          std.debug.print("tensorfold: {s} is not supported by this native engine\n", .{if (args.loop_guard_stop) "--loop-guard-stop" else "--loop-guard"});
          return 2;
      }
@@ -794,16 +795,16 @@ index f661c4d56..cad0a6f94 100644
 -    };
 +    }
      if (raiseOpenFileLimit()) |r| log.line("open-file limit raised: soft {d} -> {d}", .{ r[0], r[1] });
-     const address = resolve(io, args.host, args.port) orelse {
-         std.debug.print("tensorfold: cannot resolve --host {s}\n", .{args.host});
+     const lis = (if (args.unix_socket) |path| openUnix(a, path) else openTcp(io, args)) orelse return 1;
+     installSignals(store.enabled());
 diff --git a/zig/src/server/server.zig b/zig/src/server/server.zig
-index 958eb2239..f9b2e5a5e 100644
+index 11d5255..f4ceb61 100644
 --- a/zig/src/server/server.zig
 +++ b/zig/src/server/server.zig
-@@ -77,8 +77,8 @@ pub const Config = struct {
-     prompt_seed: bool = false,
-     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
+@@ -83,8 +83,8 @@ pub const Config = struct {
      request_log: ?[]const u8 = null,
+     /// TENSORFOLD_PHASE_METRICS=1: /metrics adds the queue phase's histogram; unset, its families are as before.
+     phase_metrics: bool = false,
 -    /// TENSORFOLD_ABLATE_MODEL: the model id whose requests get the abliteration (one of model_ids); null: none do.
 -    ablate_model: ?[]const u8 = null,
 +    /// TENSORFOLD_IDENTITIES' model ids in order (each in model_ids): a request naming the i-th gets identity i + 1.
@@ -811,8 +812,8 @@ index 958eb2239..f9b2e5a5e 100644
      /// The Spark server's keys in each reply's ``tensorfold`` block (spark_wire.zig): DeepSeek-V4, or TENSORFOLD_WIRE.
      spark_stats: bool = false,
      /// Null keeps every reply identical to a server that has no compaction.
-@@ -117,11 +117,12 @@ pub fn namedBackground(config: Config, f: Value) bool {
-     return false;
+@@ -132,11 +132,12 @@ pub fn nameStructure(format: ?[]const u8, request: *api.Request) void {
+     if (request.structure) |*st| st.field = name;
  }
  
 -/// Whether the request's model id is TENSORFOLD_ABLATE_MODEL's.
@@ -829,3 +830,15 @@ index 958eb2239..f9b2e5a5e 100644
  }
  
  pub const Server = struct {
+diff --git a/zig/src/core/engine_capabilities.zig b/zig/src/core/engine_capabilities.zig
+index e1a3c6f..b09757e 100644
+--- a/zig/src/core/engine_capabilities.zig
++++ b/zig/src/core/engine_capabilities.zig
+@@ -20,6 +20,7 @@ pub const Capability = enum {
+     pictures,
+     greedy_only,
+     slide_conversations,
++    identities,
+     vision,
+     speech,
+     embeddings,

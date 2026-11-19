@@ -47,34 +47,35 @@ license files from the pinned checkout.
   The Flash Next CUDA engine in this recipe is ported from TensorFold's Python Flash Next CUDA engine, written by
   Ash Hart and the TensorFold contributors ([contributors](https://github.com/ashhart/TensorFold/graphs/contributors));
   their authorship is recorded in TensorFold's history.
-- **The patches in `patches/` (0001 to 0017, and 0021) on TensorFold v1.2.2 are written by MiaAI-Lab** (Mia's AI Lab,
+- **The 4 patches in `patches/` (0001 to 0004) on TensorFold v1.2.7 are written by MiaAI-Lab** (Mia's AI Lab,
   [MiaAI-Lab](https://github.com/MiaAI-Lab)), under this
   repository's MIT License. They modify TensorFold's own Flash Next CUDA engine, which is by Ash Hart and the TensorFold
   contributors; that code keeps TensorFold's licenses (see `NOTICE`). Patch by patch:
   - `0001-vision-nvidia-fp4-tower`: the CUDA vision tower loads NVIDIA's MXFP8 and NVFP4 vision linears, decoded to bf16 at load. MiaAI-Lab.
   - `0002-vision-image-tokens-16384`: image-token budget 16,384. MiaAI-Lab.
-  - `0003-kv-cache-fp8`: `--kv-cache fp8` for Flash Next, so five full 262,144-token windows fit. MiaAI-Lab; the format is adapted from
+  - `0003-kv-cache-fp8`: `--kv-cache fp8` for Flash Next, so five full 262,144-token windows fit; the fp8 reader keeps the next tile in registers and
+    the MTP head's cache stays bf16 while it fits (the v1.1.4 series' 0003 and 0005, rebased onto v1.2.7). MiaAI-Lab; the format is adapted from
     MiaAI-Lab's GLM recipe patch `0038-glm-kv-fp8` in
     [GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold).
-  - `0004-prompt-expert-tile`: the shared-memory prompt expert tile for NVFP4 routed experts, carried onto v1.2.2's own K32 tile as its default at one rank.
-    MiaAI-Lab, following the staging idea of the earlier Python engine's expert kernel (TensorFold Contributors).
-  - `0005-decode-fp8-reader-and-head-cache`: fp8 attention reader that keeps the next tile in registers; the MTP head's 4-bit-row cache. MiaAI-Lab.
-  - `0006-prefill-speed`: no drain between prompt chunks, no zero fill of the fp32 `y` buffer, vectorised hyper-connection kernels, 128x128 MXFP8
-    prompt tile, 3072-row chunks. MiaAI-Lab.
-  - `0007-sampled-streams-in-the-batched-head` (sampled requests join the batched draft pass): upstream since TensorFold v1.2.2, no longer in `patches/`.
-  - `0008-sampled-gpu-top-k-candidates`: the row's k best on the device. MiaAI-Lab; the approach is Track B of MiaAI-Lab's DeepSeek recipe
-    ([DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold), patch 0021).
-  - `0009-round-cost-model`, `0010-ngram-gather-all-lanes-at-once`, `0011-host-draws-in-parallel-and-faster-candidate-kernel`: MiaAI-Lab.
-  - `0012-delta-rollback-folded-into-the-next-verify-pass`: upstream since TensorFold v1.2.2 (`TF_FLASHNEXT_KEEP_LATE`), no longer in `patches/`.
-  - `0013-ngram-pread-reader-read-ahead-and-chunk-tail-rule`: MiaAI-Lab, carrying forward the `pread` n-gram reader with read-ahead of this recipe's
-    earlier db281878 series (below), which is a port of the Python engine's NVFP4 n-gram table reader by the TensorFold Contributors to the Zig engine.
-  - `0014-prompt-hc-fusion-and-expert-tile-rows`, `0015-prompt-mx128-two-stage-tile`: fused prompt hyper-connection kernels, expert row tiles, head pieces and
-    a two-stage MX128 tile. MiaAI-Lab.
-  - `0016-decode-shared-expert-side-stream-and-lane-batched-deltanet`: MiaAI-Lab; running the shared expert on a second stream comes from the earlier
-    db281878 series.
-  - `0017-draft-chain-running-product-stop-rule`: MiaAI-Lab; the stop rule is the one of the earlier db281878 series, re-implemented on v1.1.4 and v1.2.2.
-  - `0021-mtp-head-bf16-cache-under-fp8-kv`: the MTP head's own cache in bf16 under `--kv-cache fp8`, the part of v1.1.4's `0005` that
-    v1.2.2's one-format caches had dropped. MiaAI-Lab.
+  - `0004-prompt-mxfp8-tile`: prompt passes run the wide MXFP8 projections on a 128 x 128 tile (64 x 64 for short calls) with the block scales folded
+    into the weights (the v1.1.4 series' 0006 and 0015, ported to v1.2.7's qmmf lane; the 64 x 64 form is new). MiaAI-Lab, built on TensorFold's qmmf
+    kernels and fragment helpers by Ash Hart and the TensorFold contributors.
+- **Patches `0018` to `0023` are this fork's** ([Loke-60000](https://github.com/Loke-60000)), under this repository's MIT License, on top of
+  MiaAI-Lab's series; they modify TensorFold's engine, whose code keeps TensorFold's licenses:
+  - `0018-ablate`, `0019-identities`, `0020-per-layer-identities`: per-request abliteration, named identities (`TENSORFOLD_IDENTITIES`, `ABLIT=2`).
+  - `0021-kv-cache-fp8-paged`: `--kv-cache fp8` on `TF_FLASHNEXT_KV_PAGES` pages and the one-launch lanes, carried from the paged fp8 cache of
+    MiaAI-Lab's earlier `0003` (v1.1.4) onto `0003-kv-cache-fp8` for v1.2.7.
+  - `0022-mtp-head-bf16-cache-paged`: the MTP head's bf16 cache on a pool's pages beside fp8 layers (the paged part of the v1.2.2 series' `0021`,
+    itself MiaAI-Lab's v1.1.4 `0005`).
+  - `0023-kv-cache-nvfp4`: `TF_FLASHNEXT_KV4`, NVFP4 value (and key) rows beside fp8, contiguous, paged and lanes.
+- **The v1.1.4 series** (patches 0001 to 0017 on TensorFold v1.1.4, written by MiaAI-Lab, retired with the move to v1.2.7): v1.2.7 carries most of
+  what 0004 and 0006 to 0017 did in TensorFold's own code, written by Ash Hart and the TensorFold contributors; TensorFold's K32 prompt expert staging
+  is adapted from patch 0014 (credited in TensorFold's `THIRD_PARTY_NOTICES.md`). The series as it was: the prompt expert tile (0004), prefill kernels
+  (0006, 0014, 0015), sampled streams in the batched head and GPU top-k candidates (0007, 0008; the approach is Track B of MiaAI-Lab's DeepSeek recipe
+  [DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold), patch 0021),
+  a round-cost model, n-gram rows of all lanes at once and host draws on threads (0009 to 0011), pending DeltaNet rows (0012), the `pread` n-gram reader
+  (0013, carrying forward the db281878 series' port of the Python engine's reader by the TensorFold Contributors), the shared expert on a side stream and
+  lane-batched DeltaNet (0016) and the running-product stop rule (0017, the db281878 series' rule).
 - **Earlier series on TensorFold db281878** (patches 0011 to 0015, 0021 and 0029 to 0031, on `main`, retired on this branch):
   - NVIDIA FP4 support in the Zig engine (`0011` to `0015`): by MiaAI-Lab, as a port of TensorFold's Python implementation of the same formats (CSF scale
     decoding, MXFP8 linears, the NVFP4 n-gram table and its read-ahead), written by the TensorFold Contributors, to the Zig engine and its CUDA kernels.
@@ -134,6 +135,21 @@ This recipe no longer applies those patches (the serving path is the Zig engine)
   window against `--context`, so a prompt plus `max_tokens` equal to the window was refused. The engine already keeps
   those rows beyond the window. The admission change in the engine patches and `tools/context_boundary.py` are theirs.
 - **[sparkDash](https://github.com/MiaAI-Lab/sparkDash)** by MiaAI-Lab: the Decode and Prefill benchmarks the README's performance numbers were measured with.
+- **[joernchen](https://github.com/joernchen)** asked for PDF document input in
+  [#88](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/pull/88), with a patch that rendered
+  pages over PDFium with `libturbojpeg`. TensorFold v1.2.7 took the feature into its own server
+  (`zig/src/server/pdf.zig`, `pdf_worker.zig`), so the engine half is upstream's and theirs is the request and the
+  design push; `PDF=1`, the pinned `libpdfium.so` in the image and the `--vision-pdf` wiring in `start.sh` are
+  MiaAI-Lab's.
+- **[MimiTechAi](https://github.com/MimiTechAi)** brought
+  [#77](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/77): the scan of the NGC base,
+  the list of what can go from it and the `python3-yaml` gotcha that `apt-get autoremove` exposes. `scripts/harden.sh`
+  takes those cuts; the opt-in shape, the boot gate and the choice to leave `apt-get upgrade` and every pip version to
+  the operator are MiaAI-Lab's.
+- **[chai-md](https://github.com/chai-md)** wrote
+  [#90](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/pull/90), the video patch for the CUDA
+  engine: `patches/0005` is theirs, re-based onto TensorFold v1.2.7 by MiaAI-Lab (the field layout had moved and the patch
+  had to be re-split), with `VIDEO=1`, the pinned FFmpeg build and the tests MiaAI-Lab's.
 - The scripts (`start.sh`, `stop.sh`, `scripts/`) and the checks in `tools/` are MiaAI-Lab's. `client.py`,
   `needle.py`, `toolcheck.py` and `prompt_reuse.py` are adapted from MiaAI-Lab's two-Spark recipe
   [GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold);
@@ -149,8 +165,19 @@ This recipe no longer applies those patches (the serving path is the Zig engine)
   the engine replays their compiled cubins.
 - **[Hugging Face transformers](https://github.com/huggingface/transformers)** (Apache 2.0): the Qwen vision tower's
   modules and the image processor.
-- **[PyAV](https://github.com/PyAV-Org/PyAV)** (BSD-3-Clause) and **[FFmpeg](https://ffmpeg.org/)** (LGPL): video
-  decoding. **[Pillow](https://python-pillow.org/)** (MIT-CMU): image decoding.
+- **[libjpeg-turbo](https://libjpeg-turbo.org/)** (IJG/BSD-3-Clause-like) and **[libwebp](https://github.com/webmproject/libwebp)**
+  (BSD-3-Clause): the decoders the engine loads for JPEG and WebP input, both built from pinned sources into the image by
+  `scripts/prepare.sh`.
+- **[FFmpeg](https://ffmpeg.org/)** (LGPL-2.1) and **libtfvideo** (TensorFold's `zig/src/video/tf_video.c`, Apache-2.0): the
+  decoder behind `VIDEO=1`, at the release TensorFold pins and built by TensorFold's own `tools/zig/build_ffmpeg.sh`. Kept off
+  the server's probe paths, so an image built for `VIDEO=0` never links it.
+- **[PDFium](https://pdfium.googlesource.com/pdfium)** (BSD-3-Clause) as shipped by
+  **[pypdfium2](https://pypdfium2.readthedocs.io/)** (pypdfium2 contributors): the `libpdfium.so` the image installs for
+  `PDF=1`, pinned to pypdfium2 5.14.0's aarch64 wheel by SHA-256 in `scripts/config.sh`, with the wheel's own license
+  files copied into the image. Loaded only when the server runs `--vision --vision-pdf`.
+- **[PyAV](https://github.com/PyAV-Org/PyAV)** (BSD-3-Clause), **[FFmpeg](https://ffmpeg.org/)** (LGPL) and
+  **[Pillow](https://python-pillow.org/)** (MIT-CMU): what the *Python* engine this recipe replaced decoded media with; the
+  CUDA build here runs none of them.
 - **[Hugging Face Hub](https://huggingface.co/)**: model hosting, the `hf` CLI and `huggingface_hub` (Apache 2.0), and
   the [safetensors](https://github.com/huggingface/safetensors) format (Apache 2.0) the checkpoint ships in.
 - **[Docker](https://www.docker.com/)** and the

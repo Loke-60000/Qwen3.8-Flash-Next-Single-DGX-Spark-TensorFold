@@ -1,9 +1,136 @@
 # Changelog
 
-Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:v1.2.2-00e7ddd`, built by
-`scripts/prepare.sh` from TensorFold v1.2.2 plus `patches/`.
+Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:v1.2.7-93a2e93`, built by
+`scripts/prepare.sh` from TensorFold v1.2.7 (`93a2e93e`) plus `patches/`: MiaAI-Lab's 0001 to 0005 and the lab's 0018 to 0023.
 
 ## Unreleased
+
+**2026-11-18: `scripts/harden.sh` (new) cuts the NGC base's unused ballast into its own image tag, opt-in.**
+[issue #77](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/77) by
+[MimiTechAi](https://github.com/MimiTechAi) reported 28 CRITICAL and 628 HIGH from a scan of the image and brought a
+hardening layer. `scripts/harden.sh` takes their cuts that hold on the current image — `linux-libc-dev`, the Nsight
+profilers (dpkg packages and the copies under `/usr/local/cuda-*`), Debian's `python3-pip` and `python3-setuptools` with
+their vendored `urllib3`/`msgpack` — and their `python3-yaml` restoration, which `apt-get autoremove` otherwise takes and
+the container-side checkpoint download needs. It is a separate tag
+(`tensorfold-qwen38:<tag>-hardened-<hash>`) built over `$IMAGE`: `prepare.sh`, `start.sh`, `image_hash()` and the
+published tag are untouched, and you opt in by pointing `IMAGE` at it. Two of their steps stay off by default because
+both trade reproducibility for CVE counts: `APT_UPGRADE=1` runs the `apt-get upgrade`, and `PIP_UPGRADE="urllib3==2.8.0
+..."` installs only versions you name — the script pins no versions of its own, and the `26.07-py3` base already carries
+none of the jupyter/wandb/flash_attn ballast they purged. `pip` stays in the image (only Debian's copies go; the NGC
+`/usr/local/bin/pip` remains). No scanner is installed here, so the counts are the reporter's and unverified against
+`v1.2.7-93a2e93`; what the script guarantees instead is a gate — the tag survives only if `tensorfold-native --help` and
+`serve --help` still run, the decoders are still where the engine looks, and `yaml, requests, filelock, fsspec, packaging,
+huggingface_hub` and `hf` still import for the download path. Run here: the hardened tag built over
+`tensorfold-qwen38:v1.2.7-93a2e93` and passed that gate; the image does not shrink (whiteouts, not smaller layers).
+Test: `tools/test_harden_recipe.py` (offline).
+**2026-11-18: `VIDEO=1` (new, off by default) serves video parts; the image builds `libtfvideo` over a pinned FFmpeg.**
+The Flash Next CUDA engine had no video path: `cuda_images.zig` prepared no frames and `vision/qwen_cuda_media.zig`
+refused a video token, while the server, the sampler (`zig/src/core/qwen_vl/video.zig`, 2 frames a second, two frames a
+group) and the Triton host already had one. `patches/0005-flashnext-cuda-video.patch` is
+[chai-md](https://github.com/chai-md)'s [#90](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/pull/90)
+re-based onto v1.2.7 by MiaAI-Lab (v1.2.7 added `prep_paged`/`pool_paged` to the tower's fields, so the patch had to be
+re-split); it offers the template's `<|video_pad|>` groups and lets the media plan read a group of video rows beside
+image rows. `prepare.sh` builds the decoder the way TensorFold does: FFmpeg 9.0.2 — the release its
+`tools/zig/build_ffmpeg.sh` pins, fetched and `sha256sum`-checked against that same hash — then `zig build video`, and
+installs `libtfvideo.so` in `/opt/tensorfold/libexec/tfvideo`, off every path the server probes, so `VIDEO=0` (the
+default) cannot reach FFmpeg at all; `VIDEO=1` puts that directory on the loader's path and passes
+`--vision-video-tokens` (it refuses `VIDEO=1` with `VISION=0`). The FFmpeg version and hash join `image_hash()`, and the
+image carries FFmpeg's LGPL-2.1 license and the static archives it was linked from. A clip's frame groups count against
+the same 50-group, 16,384-row budget as images, so the defaults hold roughly 50 seconds of footage a request. Verified
+here: the patch compiles (`zig build check-native-cuda-host`, zig 0.17.0, the real CUDA server without kernels), FFmpeg
+9.0.2 and `libtfvideo.so` build on this Spark. Not run here: `scripts/prepare.sh`'s image rebuild and a live video
+request (`tools/visioncheck.py` covers images only). Test: `tools/test_video_input.py` (offline).
+**2026-11-18: `PDF=1` (new, off by default) serves PDF document parts; the image carries a checksummed PDFium.**
+TensorFold v1.2.7 already reads PDF parts in the server (`zig/src/server/pdf.zig`, `pdf_worker.zig`): Anthropic's
+`{"type": "document"}`, OpenAI's `file` / `input_file`, and an `image_url` carrying a `data:application/pdf;base64,` URL,
+refused unless the server was started with `--vision --vision-pdf`. Two pieces were missing on the recipe side, so
+`prepare.sh` now takes `libpdfium.so` out of the pinned pypdfium2 aarch64 wheel (5.14.0, SHA-256 `f1b696e6…`, checked
+with `sha256sum -c` before anything reads the wheel, ~8 MB in the image), sets `TENSORFOLD_LIBPDFIUM` to it, and
+`start.sh` passes `--vision-pdf` when `PDF=1` (it refuses `PDF=1` with `VISION=0`, which the engine would refuse too).
+The pin is part of `image_hash()`, so changing the wheel builds a new image tag; nothing about `PDF=0` reads PDFium, and
+the engine's own caps stay in force (32 MiB a document, 16 pages, `TENSORFOLD_MAX_PDF_PAGES` to lower the count, the
+pages sharing the request's image budget). Asked for by [joernchen](https://github.com/joernchen) (#88), whose engine
+patch v1.2.7 supersedes. Test: `tools/test_pdf_input.py` (offline; runs `start.sh`'s own PDF lines against a stub `die`).
+Not run here: `scripts/prepare.sh` (no image rebuild on this box) and a live PDF request.
+**2026-11-18: the README says what this build serves: the window and video (#89).** The Configuration table and the
+`KV and memory` section still offered `CONTEXT=1048576` with "YaRN factor 4", which `start.sh:39` refuses: the Flash
+Next CUDA family of v1.2.7 refuses a scaled rope (`families/flashnext/cuda_config.zig:189`), so 262,144 is the
+maximum window here, not a default. The `start.sh` usage header's `CONTEXT=1048576` example is replaced by a shorter
+window, and the 1,048,576-token figures stay as the memory arithmetic they are. Reported by [hwstealer](https://github.com/hwstealer) (#89).
+
+The vision section also promised what the CUDA engine does not do. It listed MP4, WebM, MOV and MKV "anything FFmpeg
+decodes", up to 4 videos a request and an hour of footage, and quoted a 30-second video timing; the Flash Next family
+has no video path (`families/flashnext/cuda_images.zig` prepares no frames, `vision/qwen_cuda_media.zig` refuses a
+video token), so a `video_url` part is refused with `content parts must be text or image_url; audio and video inputs
+are unsupported`, and no `libtfvideo` is built into the image (`scripts/prepare.sh` builds `fatbins native`). The
+section now says that, keeps `MAX_VIDEOS` and `TENSORFOLD_VIDEO_TOKENS` as settings that bind nothing here, and points
+at #90 for the patch that would add video. The same paragraph described image decoding as a Python helper with Pillow
+and PyAV; on this engine the decode is in the binary, over the pinned libjpeg-turbo and libwebp. Test:
+`tools/test_readme_claims.py`, which reads the cap out of `start.sh` and fails when the docs offer a window above it,
+promise a YaRN this engine lacks, or describe video input this build refuses.
+
+**2026-11-13: patch `0004`, the MXFP8 prompt tile, ported to v1.2.7: prefill +7 to +9%, a 200k prompt in 95.7 s.**
+
+- `0004-prompt-mxfp8-tile` brings back the v1.1.4 series' relaxed MXFP8 prompt tile (`0006`, with `0015`'s two stages and two blocks an SM): in prompt
+  passes, the MXFP8 projections 1,024 columns or wider (DeltaNet and attention inputs, the attention and DeltaNet outputs) run on a 128 x 128 tile that
+  folds each 32-input block scale into the weights in bf16 (exact: a power-of-two multiply), so one fp32 mma chain covers K. Calls of 128 rows or fewer
+  take a 64 x 64 form of it (new here: the 128 x 128 tile cost 4 to 17 ms of first-token time on short prompts); each output's chain is the same in both,
+  so the bytes are. Decode rounds, verify windows and the MTP head keep the exact kernels. `TF_FLASHNEXT_PROMPT_MX128=0` turns it off; the setting is
+  part of the disk tier's key.
+- Prompt rows are no longer the exact kernels' bits, but within their rounding bound, and a row's bytes do not depend on its chunk, its tile or the
+  other rows of its call, so replies stay independent of drafting and of what else runs (`exact.py` passes).
+- Not ported from `0006`, `0014`, `0015`: v1.2.7 already has the rest in its own form (the writeback and normalize in one launch, `fn_hc_normalize_cols`,
+  `fn_hc_dense_mix8`, the shared expert's down projection straight into its slot, no `y` clear on one rank), and the fused HC2 read-out would save
+  about 1%. The drain between prompt chunks and 768-row head pieces were ported and measured at +0.5%, then dropped (the head pieces needed a
+  scratch cap they did not have: 1,536-row pieces overran `part` and failed the stream).
+- Checked: `tf-cuda-test qmmf-prompt-mx` (new) on the GB10: at the DeltaNet input, attention input, mixer output and a partial-tile shape, the tile's
+  fp32 rows are within the FP64 bound (2% of it used), each row's bytes are equal at 1 / 40 / 77 / 128 / 300 / 3,072 rows, five rows off the tile grid,
+  and in both forms; bf16 out is the fp32 sum rounded once. At 3,072 rows: 80 to 81 TF against the exact lane's 49 to 59 (1.4x to 1.65x); at 16 to 128
+  rows the 64 x 64 form runs as fast as the exact lane. `zig build test-cuda-host` passes (with the disk-key and form tests extended); the image builds;
+  served with the defaults: `exact.py --pad 3000` (551 drafts accepted) and `exact.py` (557), `toolcheck.py` 3/3, `visioncheck.py`, `prompt_reuse.py
+  30000` (worst 99.3%), `context_boundary.py --context 262144` (16 checks), a 199,730-token needle (prefill 95.7 s against 110.9 s without the patch and
+  100.7 s on the v1.1.4 build).
+- A/B with `tools/bench_streams.py` (same image, `TF_FLASHNEXT_PROMPT_MX128=0` against the default): prefill at 4k / 31k / 126k tokens 2,151 / 2,266 /
+  2,151 against 2,303 / 2,443 / 2,293 tok/s (+7% / +8% / +7%; the three-patch build measured 2,143 / 2,252 / 2,140). Against the v1.1.4 build
+  (2,329 / 2,566 / 2,397) prefill is now 1% / 5% / 4% behind. Decode and first-token time are unchanged (5 streams: prose 224.1 / 229.5 tok/s, code
+  201.6 / 199.5, TTFT 183 / 184 ms).
+
+**2026-11-12: TensorFold v1.1.4 to v1.2.7 (`93a2e93e`, 3,452 commits). Three patches instead of seventeen.**
+
+- Triage of the v1.1.4 series against v1.2.7: on v1.2.7 only `0001` and `0002` applied; `0003` to `0017` did not. Most of what they did is now
+  TensorFold's own code, so they are retired, and `scripts/config.sh` sets v1.2.7's switches for them instead:
+  - in v1.2.7 and on by default: sampled streams in the batched head (`0007`, `TF_FLASHNEXT_SAMPLED_HEADS`), GPU top-k candidates of a sampled draw
+    (`0008`, `TF_FLASHNEXT_GPU_TOPK`), the n-gram rows of a shared pass's lanes gathered on a thread (`0010`), pending DeltaNet rows (`0012`,
+    `TF_FLASHNEXT_KEEP_LATE`), the `pread` n-gram reader (`0013`, `TF_FLASHNEXT_PLE_IO`), the shared expert on a side stream and lane-batched DeltaNet
+    (`0016`, `TF_FLASHNEXT_SHARED_SIDE`, `TF_FLASHNEXT_GDN_LANES`) and the running-product stop rule (`0017`, `TF_FLASHNEXT_CONFIDENCE=-0.4`);
+  - in v1.2.7 as opt-ins, turned on here: the K32 prompt expert staging TensorFold adapted from our `0014` (`TF_FLASHNEXT_PROMPT_EXPERT_TILE=2`), the
+    next chunk's n-gram read-ahead (`TF_FLASHNEXT_WARM_AHEAD=1`), the product rule beside other streams (`TF_FLASHNEXT_SHARED_DRAFTS=0`, which `0017`
+    did up to 5 streams), and the 4-bit draft head that `0005` made the default (`TF_FLASHNEXT_DRAFT_HEAD=affine4`);
+  - not carried: the round-cost model (`0009`, it was off), the host draw threads (`0011`), the draft-token read-ahead and chunk tail rule (`0013`), and
+    the MX128 MXFP8 prompt tile and fused HC2 prompt path (`0006`, `0014`, `0015`; v1.2.7 has its own prompt work). Whether any of these still matters is
+    for the v1.2.7 measurement below to show.
+- `0003` (`--kv-cache fp8`) rebased onto v1.2.7, with the old `0005` folded in (the fp8 reader's register prefetch and the bf16 MTP head cache). v1.2.7's
+  attention gained page tables (`TF_FLASHNEXT_KV_PAGES`), per-rank heads and one-launch lane attention; fp8 rows stay contiguous and one-rank, so
+  `--kv-cache fp8` is refused with `--tp`, `--slide`, a captured kernel set or `TF_FLASHNEXT_KV_PAGES`, shared rounds attend lane by lane under it, the
+  reused lane buffers (`TF_FLASHNEXT_LANE_PARTS`) and in-pass prompt-cache marks size their rows by the format, and fp8 states stay off the disk tier
+  (`--learn-conversations` keeps bf16 states only). `0001` and `0002` are unchanged.
+- `libtfgrammar.so` comes from the v1.2.7 release archive (SHA-256 `250b7cd3…`, the release's own `.sha256`). No image of this patch set is published yet,
+  so `scripts/prepare.sh` builds it; the v1.1.4 image stays in the registry.
+- `TF_FLASHNEXT_CHUNK=3072` is now set in `config.sh` (v1.2.7's default is 1,536; the v1.1.4 build's patch 0006 used 3,072): about 4% faster prefill.
+- **API change from v1.2.7:** a nonzero `presence_penalty` or `frequency_penalty` is refused with HTTP 400 for Flash Next (v1.1.4 accepted and ignored them).
+- Checked: the three patches apply to v1.2.7 and give the tested tree; `zig build test-cuda-host` passes on it as on stock v1.2.7 (new host tests for the fp8
+  state, draft and stream sizes, format refusals on restore and the head-cache rule); the image builds; on the GB10 `tf-cuda-test flashnext-kv8`,
+  `flashnext-attn`, `flashnext-pages` and `flashnext-attn-lanes` pass (fp8 reads byte-equal to the bf16 kernels on the dequantized rows; the paged and
+  one-launch bf16 paths unchanged). Served, with the defaults (5 x 262,144, fp8 KV, vision on; the engine admits 5 streams of 4.83 GiB): `exact.py --pad 3000`
+  (552 drafts accepted), `toolcheck.py` 3/3, `visioncheck.py`, `prompt_reuse.py 30000` (worst 99.3%), a 199,730-token needle (prefill 110.9 s against 100.7 s
+  on the v1.1.4 build), `context_boundary.py --context 262144` (16 checks), required / named / Anthropic `any` tool calls and a JSON schema. Not re-run: the
+  sampled-exactness check, sparkDash.
+- A/B with `tools/bench_streams.py` on the same Spark (greedy, 256 tokens, median of 3), v1.1.4 build against v1.2.7 build at 1,536-row passes: decode prose
+  57.8 / 133.4 / 167.9 against 58.5 / 156.1 / 230.1 tok/s at 1 / 3 / 5 streams (+1% / +17% / +37%), code 48.2 / 104.0 / 141.3 against 51.9 / 138.8 / 206.8
+  (+8% / +33% / +46%), TTFT at 5 streams 440 / 372 ms against 177 / 173 ms; prefill at 4k / 31k / 126k tokens 2,329 / 2,566 / 2,397 against 2,108 / 2,166 /
+  2,047 tok/s (-9% / -16% / -15%). With 3,072-row passes v1.2.7 prefills 2,143 / 2,252 / 2,140 (8-12% behind). `TF_FLASHNEXT_PROMPT_EXPERT_TILE=2` against 0:
+  +1% on prefill (noise level). The prefill gap is the v1.1.4 build's MXFP8 prompt kernels (0006, 0014, 0015), not ported.
+
 
 `0023` backports TensorFold #2244 (v1.2.4) to the v1.2.2 series: the MTP head's grouped pass built each lane without its page table, so
 with `TF_FLASHNEXT_KV_PAGES` the streams beside the first read their drafts' caches through a null table and the server died in `draftMany`

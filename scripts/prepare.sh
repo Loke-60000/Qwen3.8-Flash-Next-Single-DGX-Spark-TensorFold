@@ -2,7 +2,8 @@
 # Prepare this Spark to serve Qwen3.8-Flash-Next ($QUANT_LABEL; see CHECKPOINT in scripts/config.sh) with TensorFold's Zig engine (tensorfold-native, one GPU):
 #   1. preflight: docker, the GPU, disk
 #   2. the image: tensorfold-native built from TensorFold (TF_REF) plus patches/*.patch with Zig, on NVIDIA's
-#      PyTorch container (kernels are embedded in the binary), with libjpeg-turbo and libwebp's decoder; pulled prebuilt when a matching tag is reachable (PULL=0 skips
+#      PyTorch container (kernels are embedded in the binary), with libjpeg-turbo, libwebp's decoder and the wheel's
+#      libpdfium (PDF parts, PDF=1) and libtfvideo (video, VIDEO=1) built over a pinned static FFmpeg; pulled prebuilt when a matching tag is reachable (PULL=0 skips
 #      that), else built locally
 #   3. the checkpoint in the Hugging Face cache (~96 GiB for the NVIDIA FP4 default, ~122 GiB for CHECKPOINT=int4), at its pinned revision
 #   4. verify it: every shard its index names is there, and it is a checkpoint format this engine serves (ModelOpt NVFP4 or GPTQ int4)
@@ -114,6 +115,8 @@ if [[ $REBUILD -eq 1 || "$built_hash" != "$PATCHES_HASH" ]]; then
     --build-arg ZIG_VERSION="$ZIG_VERSION" --build-arg ZIG_SHA256="$ZIG_SHA256" \
     --build-arg LIBJPEG_TURBO_VERSION="$LIBJPEG_TURBO_VERSION" --build-arg LIBJPEG_TURBO_SHA256="$LIBJPEG_TURBO_SHA256" \
     --build-arg LIBWEBP_VERSION="$LIBWEBP_VERSION" --build-arg LIBWEBP_SHA256="$LIBWEBP_SHA256" \
+    --build-arg PYPDFIUM2_WHEEL_URL="$PYPDFIUM2_WHEEL_URL" --build-arg PYPDFIUM2_AARCH64_SHA256="$PYPDFIUM2_AARCH64_SHA256" \
+    --build-arg FFMPEG_VERSION="$FFMPEG_VERSION" --build-arg FFMPEG_SHA256="$FFMPEG_SHA256" \
     --build-arg TF_RELEASE_VERSION="$TF_RELEASE_VERSION" --build-arg TF_RELEASE_AARCH64_SHA256="$TF_RELEASE_AARCH64_SHA256" \
     --build-arg PATCHES_HASH="$PATCHES_HASH" \
     -f - "$ctx" <<'DOCKERFILE'
@@ -123,6 +126,8 @@ ARG LIBJPEG_TURBO_VERSION
 ARG LIBJPEG_TURBO_SHA256
 ARG LIBWEBP_VERSION
 ARG LIBWEBP_SHA256
+ARG PYPDFIUM2_WHEEL_URL
+ARG PYPDFIUM2_AARCH64_SHA256
 RUN mkdir -p /src /opt/codecs && cd /src && \
     curl -fsSL -o jt.tar.gz "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${LIBJPEG_TURBO_VERSION}/libjpeg-turbo-${LIBJPEG_TURBO_VERSION}.tar.gz" && \
     echo "${LIBJPEG_TURBO_SHA256}  jt.tar.gz" | sha256sum -c - && \
@@ -137,6 +142,14 @@ RUN cd /src && \
     ./configure --prefix=/opt/codecs/webp --enable-libwebpdecoder --disable-static --disable-gl --disable-sdl --disable-png --disable-jpeg --disable-tiff --disable-gif --disable-wic && \
     make -j"$(nproc)" && make install && \
     test -e /opt/codecs/webp/lib/libwebpdecoder.so.3
+# PDFium (PDF document parts, --vision-pdf) comes out of the pinned pypdfium2 aarch64 wheel: the library and the license
+# files the wheel ships with it (BSD-3-Clause and the BUILD_LICENSES of what PDFium was built from) are what we take
+RUN mkdir -p /opt/codecs/pdfium/lib /opt/codecs/pdfium/licenses && cd /src && \
+    curl -fsSL -o pypdfium2.whl "${PYPDFIUM2_WHEEL_URL}" && \
+    echo "${PYPDFIUM2_AARCH64_SHA256}  pypdfium2.whl" | sha256sum -c - && \
+    python3 -c 'import os, zipfile; z = zipfile.ZipFile("pypdfium2.whl"); open("/opt/codecs/pdfium/lib/libpdfium.so", "wb").write(z.read("pypdfium2_raw/libpdfium.so")); [[os.makedirs(os.path.dirname(p) or ".", exist_ok=True), open(p, "wb").write(z.read(n))] for n in z.namelist() if "/licenses/" in n for p in [os.path.join("/opt/codecs/pdfium/licenses", n.split("/licenses/", 1)[1])]]' && \
+    test -s /opt/codecs/pdfium/lib/libpdfium.so && \
+    test -s /opt/codecs/pdfium/licenses/LICENSES/BSD-3-Clause.txt
 
 FROM ${BASE_IMAGE} AS grammar
 ARG TF_RELEASE_VERSION
@@ -166,18 +179,39 @@ RUN git init -q /tensorfold && cd /tensorfold && git remote add origin "${TF_REP
 COPY patches /opt/tf-patches
 RUN cd /tensorfold && \
     for p in /opt/tf-patches/*.patch; do [ -e "$p" ] || continue; echo "applying $p"; git apply --check "$p" && git apply "$p" || exit 1; done
-# fatbins + native only: the default install also builds tf-cuda-test and the other test tools, which serving does not need
-RUN cd /tensorfold && /opt/zig/zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Doptimize=fast --prefix /opt/tensorfold \
-      -j"$(nproc)" fatbins native && \
-    test -x /opt/tensorfold/native/bin/tensorfold-native
+# video input (VIDEO=1) is TensorFold's libtfvideo.so over a static FFmpeg. TensorFold's own tools/zig/build_ffmpeg.sh builds it: the five decoders and two
+# demuxers Qwen video needs, --disable-network, --disable-programs, no shared objects. The tarball is fetched and checked here with sha256sum and its source
+# dir handed to the script, which then skips its own download, so the build is gated on the SHA-256 pinned in scripts/config.sh (the same one that script carries).
+ARG FFMPEG_VERSION
+ARG FFMPEG_SHA256
+RUN mkdir -p /tmp/ffmpeg && cd /tmp/ffmpeg && \
+    curl -fsSL -o ffmpeg.tar.xz "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" && \
+    echo "${FFMPEG_SHA256}  ffmpeg.tar.xz" | sha256sum -c - && tar -xJf ffmpeg.tar.xz && \
+    /tensorfold/tools/zig/build_ffmpeg.sh /opt/ffmpeg /tmp/ffmpeg && \
+    mkdir -p /opt/ffmpeg/share/doc/ffmpeg/objects && \
+    cp "ffmpeg-${FFMPEG_VERSION}/COPYING.LGPLv2.1" "ffmpeg-${FFMPEG_VERSION}/LICENSE.md" /opt/ffmpeg/share/doc/ffmpeg/ && \
+    cp /opt/ffmpeg/lib/*.a /opt/ffmpeg/share/doc/ffmpeg/objects/ && \
+    rm -rf /tmp/ffmpeg
+# fatbins + native + video only: the default install also builds tf-cuda-test, which does not compile on 1.1.4 (contract_controls.cu, w4a8_tests.zig).
+# `video` installs libtfvideo.so to native/lib, where the server's dlopen would find it beside the binary; it moves to libexec/tfvideo, off every candidate
+# path, so only VIDEO=1 (start.sh putting that directory on LD_LIBRARY_PATH) makes a server take video at all.
+RUN cd /tensorfold && /opt/zig/zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Doptimize=fast -Dffmpeg=/opt/ffmpeg --prefix /opt/tensorfold \
+      -j"$(nproc)" fatbins native video && \
+    test -x /opt/tensorfold/native/bin/tensorfold-native && test -s /opt/tensorfold/native/lib/libtfvideo.so && \
+    mkdir -p /opt/tensorfold/libexec/tfvideo && \
+    mv /opt/tensorfold/native/lib/libtfvideo.so /opt/tensorfold/libexec/tfvideo/libtfvideo.so && \
+    test ! -e /opt/tensorfold/native/lib/libtfvideo.so
 RUN mkdir -p /opt/tensorfold/share/doc/tensorfold && cd /tensorfold && \
     for f in LICENSE LICENSE.md LICENSES NOTICE THIRD_PARTY_NOTICES.md; do \
-      if [ -e "$f" ]; then cp -a "$f" /opt/tensorfold/share/doc/tensorfold/ || exit 1; fi; done
+      if [ -e "$f" ]; then cp -a "$f" /opt/tensorfold/share/doc/tensorfold/ || exit 1; fi; done && \
+    cp -a /opt/ffmpeg/share/doc/ffmpeg /opt/tensorfold/share/doc/ffmpeg
 
 FROM ${BASE_IMAGE}
 COPY --from=build /opt/tensorfold /opt/tensorfold
 COPY --from=codecs /opt/codecs/jpeg/lib/libturbojpeg.so* /opt/tensorfold/lib/
 COPY --from=codecs /opt/codecs/webp/lib/libwebpdecoder.so* /opt/tensorfold/lib/
+COPY --from=codecs /opt/codecs/pdfium/lib/libpdfium.so /opt/tensorfold/lib/libpdfium.so
+COPY --from=codecs /opt/codecs/pdfium/licenses /opt/tensorfold/share/doc/tensorfold/LICENSES-pdfium
 # the engine looks for libtfgrammar.so in <binary dir>/../lib, i.e. next to native/bin
 COPY --from=grammar /opt/tfrel/lib/libtfgrammar.so /opt/tensorfold/native/lib/libtfgrammar.so
 COPY --from=grammar /opt/tfrel/LICENSES /opt/tensorfold/share/doc/tensorfold/LICENSES-grammar
@@ -185,7 +219,8 @@ RUN ln -s /opt/tensorfold/native/bin/tensorfold-native /usr/local/bin/tensorfold
 ARG PATCHES_HASH
 LABEL tf.patches=${PATCHES_HASH} tf.kernels=embedded
 ENV HF_HOME=/root/.cache/huggingface CUDA_CACHE_PATH=/cache/nv \
-    TENSORFOLD_LIBTURBOJPEG=/opt/tensorfold/lib/libturbojpeg.so.0 TENSORFOLD_LIBWEBP=/opt/tensorfold/lib/libwebpdecoder.so.3
+    TENSORFOLD_LIBTURBOJPEG=/opt/tensorfold/lib/libturbojpeg.so.0 TENSORFOLD_LIBWEBP=/opt/tensorfold/lib/libwebpdecoder.so.3 \
+    TENSORFOLD_LIBPDFIUM=/opt/tensorfold/lib/libpdfium.so
 WORKDIR /workspace
 DOCKERFILE
   rm -rf -- "$ctx"; trap - EXIT

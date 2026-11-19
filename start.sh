@@ -4,16 +4,18 @@
 # 8888, waits until the OpenAI API answers, then runs a smoke test. Stop it with ./stop.sh.
 #
 # Usage: ./start.sh [restart] [extra tensorfold-native serve args]
-#   ./start.sh                         # up to 5 requests at once, a 262,144-token window, fp8 KV, image and video, MTP drafts
+#   ./start.sh                         # up to 5 requests at once, a 262,144-token window, fp8 KV, images, MTP drafts
 #   ./start.sh restart                 # stop, then start again; the new arguments are checked before stopping
 #   ./start.sh restart --parallel 2 --context 131072
-#   CONTEXT=1048576 ./start.sh restart # YaRN factor 4; a full 1M prompt does not leave 10 GiB free on one Spark
+#   CONTEXT=131072 ./start.sh restart  # a shorter window leaves more of the KV pool to the other streams
 #   DRAFTS=0 ./start.sh restart        # no MTP drafts (--no-drafts)
 #   DRY_RUN=1 ./start.sh               # print the docker command and exit
 # Extra arguments go to tensorfold-native serve after the defaults, so they win.
 # Settings, from the environment or ./.env (scripts/config.sh):
 #   serving  CONTEXT, PARALLEL, MAX_TOKENS, PROMPT_CACHE_GIB, THINKING, DRAFTS, TEMPERATURE, TOP_P, TOP_K, SERVED_NAME, HOST, PORT
 #   files    CHECKPOINT (nvfp4 | int4), MODEL_ID, MODEL_REVISION, HF_CACHE, KERNEL_CACHE, STATE_DIR
+#   vision   VISION (0|1), VISION_URLS (0|1, public https media), PDF (0|1, PDF document parts through the engine's PDFium),
+#            VIDEO (0|1, video parts; puts the image's libtfvideo.so, FFmpeg 9.0.2, on the loader's path)
 #   ablit    ABLIT=1 serves NVIDIA's FP4 with the Keys house-qsa abliteration overlay (gated; needs an HF token); 0 is stock (default);
 #            2 serves stock and SERVED_NAME-abliterated (the same abliteration) side by side, per request
 #   image    IMAGE, TF_REPO, TF_REF, ZIG_VERSION, BASE_IMAGE, GHCR_IMAGE, CONTAINER_NAME
@@ -37,8 +39,10 @@ for arg in "$@"; do [[ "$arg" == -h || "$arg" == --help ]] && { usage; exit 0; }
 [[ "$PARALLEL" =~ ^([1-9]|1[0-6])$ ]] || die "PARALLEL is 1 to 16, not $PARALLEL"
 [[ "$MAX_TOKENS" =~ ^[1-9][0-9]*$ ]] || die "MAX_TOKENS is a token count, not $MAX_TOKENS"
 [[ -z "$PROMPT_CACHE_GIB" || "$PROMPT_CACHE_GIB" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "PROMPT_CACHE_GIB is GiB (e.g. 2 or 1.5), not $PROMPT_CACHE_GIB"
-for v in THINKING DRAFTS VISION VISION_URLS; do [[ "${!v}" =~ ^[01]$ ]] || die "$v is 0 or 1, not ${!v}"; done
-(( CONTEXT <= 262144 )) || die "CONTEXT=$CONTEXT is past 262,144: TensorFold 1.2.2's Flash Next engine has no YaRN extension"
+for v in THINKING DRAFTS VISION VISION_URLS PDF VIDEO; do [[ "${!v}" =~ ^[01]$ ]] || die "$v is 0 or 1, not ${!v}"; done
+[[ "$PDF" != 1 || "$VISION" == 1 ]] || die "PDF=1 renders pages through the vision path: start it with VISION=1 (the default)"
+[[ "$VIDEO" != 1 || "$VISION" == 1 ]] || die "VIDEO=1 decodes through the vision path: start it with VISION=1 (the default)"
+(( CONTEXT <= 262144 )) || die "CONTEXT=$CONTEXT is past 262,144: TensorFold 1.2.7's Flash Next engine has no YaRN extension"
 DRY=0; [[ "${DRY_RUN:-0}" == 1 ]] && DRY=1
 
 SERVE_ARGS=(--context "$CONTEXT" --parallel "$PARALLEL" --max-tokens "$MAX_TOKENS"
@@ -49,10 +53,15 @@ if [[ "$THINKING" == 1 ]]; then SERVE_ARGS+=(--thinking); else SERVE_ARGS+=(--no
 SERVE_ARGS+=(--kv-cache "$KV_DTYPE")
 [[ -z "$PROMPT_CACHE_GIB" ]] || SERVE_ARGS+=(--prompt-cache-gib "$PROMPT_CACHE_GIB")
 [[ "$MAX_VIDEOS" =~ ^[0-9]+$ ]] || die "MAX_VIDEOS is a count, not $MAX_VIDEOS"
+[[ "$TENSORFOLD_VIDEO_TOKENS" =~ ^[0-9]+$ ]] || die "TENSORFOLD_VIDEO_TOKENS is a token count, not $TENSORFOLD_VIDEO_TOKENS"
 if [[ "$VISION" == 1 ]]; then
   SERVE_ARGS+=(--vision --vision-max-images "$TENSORFOLD_MAX_IMAGES" --vision-max-videos "$MAX_VIDEOS"
                --vision-image-tokens "$TENSORFOLD_IMAGE_TOKENS")
   [[ "$VISION_URLS" == 1 ]] && SERVE_ARGS+=(--vision-urls)
+  [[ "$PDF" == 1 ]] && SERVE_ARGS+=(--vision-pdf)
+  # the engine's own ceiling for --vision-video-tokens is 64 to 262,144 rows; better to say so here than at serve time
+  (( TENSORFOLD_VIDEO_TOKENS >= 64 && TENSORFOLD_VIDEO_TOKENS <= 262144 )) || die "TENSORFOLD_VIDEO_TOKENS is 64 to 262144 (the engine's range for --vision-video-tokens), not $TENSORFOLD_VIDEO_TOKENS"
+  [[ "$VIDEO" == 1 ]] && SERVE_ARGS+=(--vision-video-tokens "$TENSORFOLD_VIDEO_TOKENS")
 fi
 USER_ARGS=("$@")
 arg_value() {
@@ -181,6 +190,10 @@ done < <(env | grep -E '^(TENSORFOLD|TF_FLASHNEXT)_[A-Z0-9_]+=' || true)
 KEY_ARGS=(); [[ -z "${TENSORFOLD_API_KEY:-}" ]] || { export TENSORFOLD_API_KEY; KEY_ARGS=(-e TENSORFOLD_API_KEY); }
 
 step 3 "Launch: container $CONTAINER_NAME"
+# libtfvideo.so (FFmpeg, VIDEO=1) is built into the image but kept off every path the server probes for it, in libexec/tfvideo; VIDEO=1 is what puts that
+# directory on the loader's path. The container's own shell composes the value so what the NVIDIA runtime injected (the CUDA stubs) stays in front of it.
+CMD_PREFIX=()
+[[ "$VIDEO" == 1 ]] && CMD_PREFIX=(sh -c 'export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/opt/tensorfold/libexec/tfvideo"; exec "$@"' tfvideo)
 log "tensorfold-native serve $MODEL_ARG --name $SERVED_NAME --host $HOST --port $PORT ${SERVE_ARGS[*]} ${USER_ARGS[*]}"
 here_cmd=(docker run -d --name "$CONTAINER_NAME"
           --gpus all --ipc=host --network host
@@ -189,6 +202,7 @@ here_cmd=(docker run -d --name "$CONTAINER_NAME"
           -v "$HF_CACHE":/root/.cache/huggingface:ro
           -v "$KERNEL_CACHE/$KCACHE":/cache
           "$IMAGE"
+          ${CMD_PREFIX[@]+"${CMD_PREFIX[@]}"}
           tensorfold-native serve "$MODEL_ARG" --name "$SERVED_NAME" --host "$HOST" --port "$PORT"
           "${SERVE_ARGS[@]}" "${USER_ARGS[@]}")
 if (( DRY )); then
