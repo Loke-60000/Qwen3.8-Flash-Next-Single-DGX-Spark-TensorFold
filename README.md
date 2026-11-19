@@ -36,6 +36,33 @@ is unchanged.
   (see [KV and memory](#kv-and-memory)). The engine keeps 9 GiB free, and another 2 GiB for the vision path.
 - One command: `./start.sh` sets everything up on the first run and starts the server; `./stop.sh` stops it
 
+## This fork
+
+The lab's patches `0006` to `0011` sit on top of MiaAI-Lab's series (see `CREDITS.md`):
+
+- **Per-request identities** (`0006` to `0008`): `TENSORFOLD_IDENTITIES=id=file,...` serves extra model ids from the same weights with
+  abliteration directions applied per request; a file can be `hf:owner/repo/path[@revision]`, which `prepare.sh` downloads. `ABLIT=2`
+  sets one up for the house-qsa directions. `tools/verify_ablate.py` checks that each id keeps its own prompt-cache states.
+- **A shared KV pool with fp8 and NVFP4 rows** (`0009` to `0011`): `KV_DTYPE=fp8` now works on `TF_FLASHNEXT_KV_PAGES` pages and the
+  one-launch lanes, the MTP head keeps its bf16 cache on a pool's pages, and `TF_FLASHNEXT_KV4=values|all` stores value (and key) rows
+  as NVFP4. With pages, `PARALLEL` (up to 16) is a cap: stream 1 keeps its own window and the others take 256-position pages as they
+  need them, so a few long requests or many short ones share one pool.
+- **`PROMPT_CACHE_GIB`**: the prompt cache's cap. On v1.2.7 with pages the pool takes the room before the cache, and the pages are
+  taken at start while the cache fills as it is used, so set both this and `TENSORFOLD_MEMORY_RESERVE_GIB` for the memory you can give.
+- **`restart.sh`**: a restart with the Spark's small services (embeddings, speech-to-text, tempo) paused during the load.
+
+The lab's Spark runs `PARALLEL=15`, `TF_FLASHNEXT_KV_PAGES=256`, `TF_FLASHNEXT_KV4=values`, `TENSORFOLD_MEMORY_RESERVE_GIB=12`,
+`PROMPT_CACHE_GIB=4`, `PDF=1`, `VIDEO=1`, beside about 8 GiB of other services: 1,621 pages (about 415k tokens) beside the engine's own
+262,144-token window and a 2.1 GiB prompt cache, with 9.5 GiB or more free under the stress runs below. Against the lab's v1.2.2 build
+(same pool, `tools/bench_streams.py`, 256 tokens, greedy, median of 3; 5 runs at 12 and 15 streams):
+
+| | v1.2.2 lab build | this build |
+| --- | ---: | ---: |
+| Decode prose, 1 / 5 / 8 / 12 / 15 streams (tok/s) | 52.8 / 211.0 / 284.3 / 286.9 / 376.0 | 52.4 / 210.8 / 288.7 / 332.7 / 342.5 |
+| Decode code, 1 / 5 / 8 / 12 / 15 streams (tok/s) | 47.2 / 191.0 / 265.5 / 300.3 / 377.1 | 48.8 / 190.9 / 264.7 / 310.3 / 326.6 |
+| TTFT at 1 / 5 / 15 streams, prose | 69 / 206 / 519 ms | 60 / 178 / 474 ms |
+| Prefill 4k / 16k / 63k (tok/s) | 2,333 / 2,571 / 2,545 | 2,293 / 2,354 / 2,331 |
+
 ## Performance
 
 > **The sparkDash tables below are the v1.1.4 build's** (TensorFold v1.1.4 with its patches `0001` to `0017`, 2026-10-27). The recipe now builds

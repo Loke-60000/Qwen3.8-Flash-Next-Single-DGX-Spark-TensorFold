@@ -5,6 +5,18 @@ Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:
 
 ## Unreleased
 
+**2026-11-19: TensorFold v1.2.7 and MiaAI-Lab's series (video, PDF, harden), with the lab's patches carried as `0006` to `0011`.**
+MiaAI-Lab's `main` merged into the lab branch. The lab's `0018` to `0020` (identities) went onto v1.2.7 by three-way merge; the paged fp8
+cache that MiaAI-Lab's v1.2.7 `0003` leaves out (it refuses `TF_FLASHNEXT_KV_PAGES` with fp8), the MTP head's bf16 cache on pages and the
+NVFP4 rows were ported onto Mia's kernels and glue (`0009` to `0011`); the old `0023` is in v1.2.7 (TensorFold #2244). The series applied to
+`TF_REF` reproduces the ported tree byte for byte. Checks on the Spark: `tf-cuda-test flashnext-kv8` and `flashnext-kv4` (writes equal the
+format's model byte for byte; contiguous, paged, one-launch lanes and the head's bf16 page share equal the reference), `flashnext-pages`
+(67 PASS), `flashnext-attn`, `flashnext-attn-lanes`; served: `exact.py` at pad 0, 1k and 3k, toolcheck 3/3, `verify_ablate.py`, 15 concurrent
+2.4k-token prompts and 14 beside a 120k-token one, a video (two colours named) and a PDF (its word read). The image is MiaAI-Lab's Dockerfile
+with the engine stage built outside it. Prefill is 8% behind the v1.2.2 lab build at 16k and 63k (the retired prefill patches; MiaAI-Lab
+measures v1.2.7 behind v1.1.4 too), decode is level at 1 to 8 streams, 3 to 16% ahead at 12 and 9 to 13% behind at 15, and the first token
+comes 10 to 25% sooner; see "This fork" in `README.md`.
+
 **2026-11-18: `scripts/harden.sh` (new) cuts the NGC base's unused ballast into its own image tag, opt-in.**
 [issue #77](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/issues/77) by
 [MimiTechAi](https://github.com/MimiTechAi) reported 28 CRITICAL and 628 HIGH from a scan of the image and brought a
