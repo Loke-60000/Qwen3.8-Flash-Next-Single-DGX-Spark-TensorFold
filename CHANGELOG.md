@@ -5,6 +5,20 @@ Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:
 
 ## Unreleased
 
+`0023` backports TensorFold #2244 (v1.2.4) to the v1.2.2 series: the MTP head's grouped pass built each lane without its page table, so
+with `TF_FLASHNEXT_KV_PAGES` the streams beside the first read their drafts' caches through a null table and the server died in `draftMany`
+(segfault, six concurrent 3k-token prompts). One field, `.pg = d.pg`, as the lone head's pass already had. Image `tensorfold-qwen38:v1.2.2-kv4pg`:
+the kv4 fatbins with tensorfold-native rebuilt. Checks on the Spark with `PARALLEL=15`, `TF_FLASHNEXT_KV_PAGES=256`: `exact.py` at pad 0, 1k
+and 3k (drafted == serial == concurrent, the same hashes as the unpaged build), toolcheck 3/3, `verify_ablate.py gl-zero-skuld gl-zero`,
+15 concurrent 2.4k-token prompts each reserving 32,768 reply tokens, and 14 of those beside one 120k-token prompt (all served).
+Speeds against the unpaged 5-stream build, same harness (`bench_streams.py`, 256 tokens, greedy, median of 3): decode at 1 to 5 streams
+within noise (prose 52.8 vs 53.5 at 1, 211.0 vs 213.0 at 5; code 191.0 vs 193.2 at 5), and 8 / 12 / 15 streams now reach 284 / 287 / 376 tok/s
+prose and 266 / 300 / 377 code; prefill 2,333 / 2,571 / 2,545 tok/s at 4k / 16k / 63k (was 2,347 / 2,585 / 2,574).
+On the Spark the pages are taken at start and the prompt cache fills as it is used, and `restart.sh` measures the room with the small
+services paused: the default 3 GiB reserve let a full cache take MemAvailable to 7.3 GiB under load, where memguard acts at 7.
+A 6 GiB reserve gives 1,386 pages of 256 rows (about 355k tokens beside the engine's own 262,144 window) and a 5.3 GiB cache; the
+stress runs above stayed at 10.7 GiB free or more.
+
 **2026-11-06: opt-in NVFP4 KV cache (patch `0022`, `TF_FLASHNEXT_KV4=values|all` with `KV_DTYPE=fp8`; unset is byte-identical).**
 A cache row of 256 values is E2M1 codes (128 bytes), an E4M3 scale per 16 values and a power-of-two fp32 row scale, so a read is an exact bf16
 value and the attention sums are the bf16 kernels' on the dequantized rows (`tf-cuda-test flashnext-kv4`: writes equal the CPU model byte for byte,
