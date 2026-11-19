@@ -45,7 +45,7 @@ MODEL_REVISION="${MODEL_REVISION:-}"
 # export HF_TOKEN or `hf auth login` with that account. It only fits the nvfp4 checkpoint at the revision it was made from. The model has had safety
 # refusals removed. Its author's own checks (refusal32 32/32) ran on the vLLM/TensorFold recipe, not on this build: validate it here (tools/exact.py,
 # tools/needle.py) before relying on it.
-# ABLIT=2 serves the same house-qsa abliteration per request instead (patches 0018 to 0020): the stock model as SERVED_NAME and the
+# ABLIT=2 serves the same house-qsa abliteration per request instead (patches 0006 to 0008): the stock model as SERVED_NAME and the
 # abliterated one as SERVED_NAME-abliterated, both from the stock weights. Its directions file, recovered from the sidecar, is downloaded from
 # ABLIT_DIRECTIONS (gated with automatic approval, like the overlay). A TENSORFOLD_IDENTITIES of your own takes precedence.
 ABLIT="${ABLIT:-0}"

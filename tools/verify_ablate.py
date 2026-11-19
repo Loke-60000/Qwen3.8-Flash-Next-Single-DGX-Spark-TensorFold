@@ -1,4 +1,4 @@
-"""Per-request abliteration (patches 0018, 0019): every model id given (default: the stock SERVED_NAME and SERVED_NAME-abliterated)
+"""Per-request abliteration (patches 0006, 0007): every model id given (default: the stock SERVED_NAME and SERVED_NAME-abliterated)
 is sent one long prompt twice; the second pass resumes that id's own kept state (the prompt cache line says so) and its
 greedy reply matches the cold one. Ids never resume each other's states: each cold pass starts from zero.
 Usage: tools/verify_ablate.py [model id ...]   (API_URL, default http://127.0.0.1:$PORT with PORT 8888; CONTAINER for the logs)"""

@@ -1,6 +1,6 @@
 # Per-request abliteration: one checkpoint, stock and abliterated
 
-Patches 0018 to 0020 let the server apply an abliteration at run time, per request. The served checkpoint is the stock
+Patches 0006 to 0008 let the server apply an abliteration at run time, per request. The served checkpoint is the stock
 one; a request that names an identity in `TENSORFOLD_IDENTITIES` gets that abliterated model's reply from the same
 weights, in the same decode round as everyone else. Requests that name no identity are unchanged byte for byte.
 
@@ -53,7 +53,7 @@ A global file applies the same directions at every layer from `first_layer` up:
 | `lam_attn` [k], `lam_shared` [k] fp32 | the strengths for the token mixers and the shared expert |
 | `first_layer` [1] int64 | the first layer edited |
 
-A per-layer file (patch 0020) edits only the layers it lists, each with a direction of its own, the way
+A per-layer file (patch 0008) edits only the layers it lists, each with a direction of its own, the way
 `W' = D (W - lam v v^T W)` does (`D` a per-row rescale, as after a row-norm restore). At a listed layer the token
 mixer's output becomes `D (y - lam (v . y) v)`; other layers and the shared expert are left alone:
 

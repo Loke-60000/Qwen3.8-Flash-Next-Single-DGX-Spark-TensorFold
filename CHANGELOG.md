@@ -1,7 +1,7 @@
 # Changelog
 
 Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:v1.2.7-93a2e93`, built by
-`scripts/prepare.sh` from TensorFold v1.2.7 (`93a2e93e`) plus `patches/`: MiaAI-Lab's 0001 to 0005 and the lab's 0018 to 0023.
+`scripts/prepare.sh` from TensorFold v1.2.7 (`93a2e93e`) plus `patches/`: MiaAI-Lab's 0001 to 0005 and the lab's 0006 to 0011.
 
 ## Unreleased
 

@@ -60,14 +60,14 @@ license files from the pinned checkout.
   - `0004-prompt-mxfp8-tile`: prompt passes run the wide MXFP8 projections on a 128 x 128 tile (64 x 64 for short calls) with the block scales folded
     into the weights (the v1.1.4 series' 0006 and 0015, ported to v1.2.7's qmmf lane; the 64 x 64 form is new). MiaAI-Lab, built on TensorFold's qmmf
     kernels and fragment helpers by Ash Hart and the TensorFold contributors.
-- **Patches `0018` to `0023` are this fork's** ([Loke-60000](https://github.com/Loke-60000)), under this repository's MIT License, on top of
+- **Patches `0006` to `0011` are this fork's** ([Loke-60000](https://github.com/Loke-60000)), under this repository's MIT License, on top of
   MiaAI-Lab's series; they modify TensorFold's engine, whose code keeps TensorFold's licenses:
-  - `0018-ablate`, `0019-identities`, `0020-per-layer-identities`: per-request abliteration, named identities (`TENSORFOLD_IDENTITIES`, `ABLIT=2`).
-  - `0021-kv-cache-fp8-paged`: `--kv-cache fp8` on `TF_FLASHNEXT_KV_PAGES` pages and the one-launch lanes, carried from the paged fp8 cache of
+  - `0006-ablate`, `0007-identities`, `0008-per-layer-identities`: per-request abliteration, named identities (`TENSORFOLD_IDENTITIES`, `ABLIT=2`).
+  - `0009-kv-cache-fp8-paged`: `--kv-cache fp8` on `TF_FLASHNEXT_KV_PAGES` pages and the one-launch lanes, carried from the paged fp8 cache of
     MiaAI-Lab's earlier `0003` (v1.1.4) onto `0003-kv-cache-fp8` for v1.2.7.
-  - `0022-mtp-head-bf16-cache-paged`: the MTP head's bf16 cache on a pool's pages beside fp8 layers (the paged part of the v1.2.2 series' `0021`,
+  - `0010-mtp-head-bf16-cache-paged`: the MTP head's bf16 cache on a pool's pages beside fp8 layers (the paged part of the v1.2.2 series' `0021`,
     itself MiaAI-Lab's v1.1.4 `0005`).
-  - `0023-kv-cache-nvfp4`: `TF_FLASHNEXT_KV4`, NVFP4 value (and key) rows beside fp8, contiguous, paged and lanes.
+  - `0011-kv-cache-nvfp4`: `TF_FLASHNEXT_KV4`, NVFP4 value (and key) rows beside fp8, contiguous, paged and lanes.
 - **The v1.1.4 series** (patches 0001 to 0017 on TensorFold v1.1.4, written by MiaAI-Lab, retired with the move to v1.2.7): v1.2.7 carries most of
   what 0004 and 0006 to 0017 did in TensorFold's own code, written by Ash Hart and the TensorFold contributors; TensorFold's K32 prompt expert staging
   is adapted from patch 0014 (credited in TensorFold's `THIRD_PARTY_NOTICES.md`). The series as it was: the prompt expert tile (0004), prefill kernels

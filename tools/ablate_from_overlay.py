@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A per-layer identity file (patch 0020) from a baked abliteration overlay: for each edited o_proj, the overlay holds
+"""A per-layer identity file (patch 0008) from a baked abliteration overlay: for each edited o_proj, the overlay holds
 W' = D (W - lam v v^T W) (D a per-row rescale, e.g. a row-norm restore), MXFP8 like the stock FP4-Local checkpoint.
 Given the stock weights and each layer's lam, this recovers v (the left singular vector of W - W'/D) and D, and writes
 `layers`, `directions`, `lam`, `row_scale` for TENSORFOLD_IDENTITIES. It prints each layer's reconstruction error, which
