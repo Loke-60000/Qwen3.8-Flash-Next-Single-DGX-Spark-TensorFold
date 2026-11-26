@@ -164,6 +164,9 @@ MAX_TOKENS="${MAX_TOKENS:-32768}"
 # TF_FLASHNEXT_KV_PAGES the cache and the streams' pages share one room: a smaller cache is more pages, and pages are
 # taken at start while the cache fills as it is used. To give other processes room, raise TENSORFOLD_MEMORY_RESERVE_GIB.
 PROMPT_CACHE_GIB="${PROMPT_CACHE_GIB:-}"
+# A prompt whose every state passes the cache budget keeps the furthest state the budget holds, so a conversation past
+# what the budget holds still resumes most of the way (patch 0013; 0 keeps nothing, as upstream does).
+export TENSORFOLD_PROMPT_CACHE_PARTIAL="${TENSORFOLD_PROMPT_CACHE_PARTIAL:-1}"
 # Kept prompt states on disk (--spill-gib): a state the prompt cache pushes out of RAM, and those left at a planned stop,
 # are written under SPILL_DIR and read back when their conversation returns, token for token as a fresh prompt pass.
 # Empty: off. The writes are budgeted for the SSD: SPILL_DAILY_GIB a day at most, SPILL_MIN_FREE_GIB of the disk kept

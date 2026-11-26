@@ -1,0 +1,320 @@
+diff --git a/docs/environment.md b/docs/environment.md
+index 38b5cbc..c2585e1 100644
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -26,6 +26,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_DRAFT_NODES` | Whole native-size nonnegative count, capped by the drafter's window; zero disables trees |
+ | `TF_QMMF_HALF_BELOW` | Whole native-size nonnegative block count; zero disables half tiles; default 96 |
+ | `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS` | Exactly `0` or `1`, checked when the CUDA backend starts; default off ([profiles](profiles.md)) |
++| `TENSORFOLD_PROMPT_CACHE_PARTIAL` | Exactly `0` or `1`, checked when the CUDA backend starts; default off ([profiles](profiles.md)) |
+ | `TF_HEAD_GEOMETRY` | Whole native-size nonnegative geometry count in the head benchmark |
+ | `TF_ROCE_GID_INDEX` | Whole index 0 through 2147483647; unset searches for a RoCE v2 IPv4 GID |
+ | `TF_GEMMA4_CHUNK_SOLO` | Gemma 4 on CUDA: a multiple of 512 from 512 through 4096; unset, empty or 512 is off. Checked when the model loads, with the family's own message |
+diff --git a/docs/profiles.md b/docs/profiles.md
+index 29657eb..38aa9ab 100644
+--- a/docs/profiles.md
++++ b/docs/profiles.md
+@@ -51,7 +51,8 @@ Coverage includes:
+   with `TENSORFOLD_DORY_KV_PAGES=0` it refuses to load, by both names. With the switch unset, the startup line
+   shows `TENSORFOLD_DORY_KV_PAGES=1 (arithmetic, TF_KV_SHARE)` and kept states carry the same identity as `=1`.
+ - Every CUDA family whose host prompt cache the CUDA host builds (Nemotron, Nemotron Omni, GLM, MiniMax M3, Qwen3.5
+-  dense/MoE, Flash Next, Kolibri-1, Gemma 4, Spark2.5, Dory): `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS`, exact `1` only.
++  dense/MoE, Flash Next, Kolibri-1, Gemma 4, Spark2.5, Dory): `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS` and
++  `TENSORFOLD_PROMPT_CACHE_PARTIAL`, exact `1` only.
+ - Flash Next on CUDA: `TF_FLASHNEXT_KV_PAGES`, `TF_FLASHNEXT_KV_PAGES_ALL`.
+ - Dory on CUDA: `TENSORFOLD_DORY_KV_PAGES`, full-attention caches in pool pages unless it is exactly `0`; unset,
+   every stream's caches are contiguous and made at open.
+@@ -70,6 +71,12 @@ this registry is unchanged. The two GLM host-memory switches carry
+ `TF_GLM_PROMPT_TAIL` carries [#2226](https://github.com/ashhart/TensorFold/pull/2226)'s. `TF_GLM_KV_HOST_GIB` stays
+ outside the registry: it sizes those pages rather than choosing a policy, and its reader keeps its own default.
+ 
++`TENSORFOLD_PROMPT_CACHE_PARTIAL=1` changes which prompt states are kept, never a token. When every state a pass
++would keep passes the whole cache budget, it keeps one at the furthest row past the resume point that the budget
++holds (on a 256-token block edge when one is past it), so the next turn prefills only what lies past that row
++instead of the whole prompt. That state may evict every other kept state. Families whose states sit on planned
++chunk starts keep nothing, as before. Off: a state past the budget is refused and nothing is evicted.
++
+ `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS=1` ([#2346](https://github.com/ashhart/TensorFold/issues/2346)) changes which
+ prompt states are kept, never a token. A new state may then evict only its own conversation's states: kept states
+ whose tokens begin the new prompt, that no lookup borrows and that aren't a shared cut or a branch point. A state
+diff --git a/zig/src/core/profile.zig b/zig/src/core/profile.zig
+index ace744e..039e8c2 100644
+--- a/zig/src/core/profile.zig
++++ b/zig/src/core/profile.zig
+@@ -23,6 +23,7 @@ pub const Switch = enum {
+     TF_GLM_PROMPT_STEPS,
+     TF_GLM_SHARED,
+     TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS,
++    TENSORFOLD_PROMPT_CACHE_PARTIAL,
+     TENSORFOLD_KOLIBRI_KV_PAGES,
+     TENSORFOLD_DORY_KV_PAGES,
+     GEMMA_DRAFT_BF16,
+@@ -156,6 +157,7 @@ pub const entries = [_]Entry{
+     .{ .id = .TF_GLM_PROMPT_STEPS, .families = &.{"glm5_next"}, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 runs rank 0's prompt passes whole, not in chunks", .evidence = "#2370" },
+     .{ .id = .TF_GLM_SHARED, .families = &.{"glm5_next"}, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 runs each of rank 0's windows in its own forward", .evidence = "#2370" },
+     .{ .id = .TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS, .families = cuda_cache, .class = .identical, .syntax = .one, .effect = "A new prompt state that fits only by evicting another conversation's is not kept", .evidence = "#2346" },
++    .{ .id = .TENSORFOLD_PROMPT_CACHE_PARTIAL, .families = cuda_cache, .class = .identical, .syntax = .one, .effect = "A prompt whose every state passes the cache budget keeps the furthest state the budget holds", .evidence = "gl-lab 0013" },
+     .{ .id = .TENSORFOLD_KOLIBRI_KV_PAGES, .families = &.{"kolibri1"}, .class = .arithmetic, .report_values = &.{"0"}, .effect = "Exact 0 disables requested pool pages; other text keeps the option", .evidence = "#2370" },
+     .{ .id = .TENSORFOLD_DORY_KV_PAGES, .families = &.{"dory"}, .class = .arithmetic, .syntax = .not_zero, .on_with = .TF_KV_SHARE, .effect = "Present text except exact 0 selects pool pages instead of default windows", .evidence = "#2370" },
+     .{ .id = .GEMMA_DRAFT_BF16, .families = &.{ "gemma4", "gemma4_unified" }, .backend = "metal", .class = .debug, .report_values = &.{ "all", "fc", "self_attn.q_proj", "self_attn.k_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.down_proj" }, .effect = "Keep selected drafter stacks in stored BF16 instead of quantizing them", .evidence = "#2370" },
+diff --git a/zig/src/core/prompt_cache.zig b/zig/src/core/prompt_cache.zig
+index c2d8891..1a97007 100644
+--- a/zig/src/core/prompt_cache.zig
++++ b/zig/src/core/prompt_cache.zig
+@@ -12,6 +12,7 @@ const interior = @import("prompt_interior.zig");
+ const index = @import("prompt_cache_index.zig");
+ const forks = @import("prompt_cache_fork.zig");
+ pub const others = @import("prompt_cache_others.zig");
++pub const fit = @import("prompt_cache_fit.zig");
+ pub const rows = @import("rows_store.zig");
+ /// A family's copy of one state.
+ pub const Saved = *anyopaque;
+@@ -127,6 +128,7 @@ pub const Store = struct {
+     hold: bool = false, // memory pressure: lookups plan no marks and keeps refuse, so no new state is kept
+     over: []const u8 = "", // what refusing a state past the whole budget adds: the setting that keeps it otherwise
+     keep_others: bool = false, // a new state may evict only its own conversation's states (prompt_cache_others.zig)
++    partial: bool = false, // every mark past the budget: keep the furthest state it holds (prompt_cache_fit.zig)
+     repeat_log: @import("prompt_cache_repeat.zig").Log = .{},
+     const SHARED_KEYS = 64;
+     pub const lookupUserImages = images.lookupUser;
+@@ -322,9 +324,9 @@ pub const Store = struct {
+         if (e == null) s.counts.misses += 1;
+         const from = if (e) |x| x.at else 0;
+         const ordinary = if (s.active_rewind_at == 0)
+-            try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, 0, shared, starts, spans, if (e) |x| x.last else &.{}))
++            try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, 0, shared, starts, spans, if (e) |x| x.last else &.{}), from)
+         else
+-            try s.fittingRewind(a, try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, s.active_rewind_at, shared, starts, spans, if (e) |x| x.last else &.{})), endpoint, s.active_rewind_at, endpoint_bytes);
++            try s.fittingRewind(a, try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, s.active_rewind_at, shared, starts, spans, if (e) |x| x.last else &.{}), from), endpoint, s.active_rewind_at, endpoint_bytes);
+         const known_end = if (user_end <= history_len) user_end else 0;
+         const marks_ = interior.add(s, a, prompt, from, known_end, rewind_len, starts, spans, ordinary, endpoint, endpoint_bytes, e) catch |err| {
+             a.free(ordinary);
+@@ -338,6 +340,7 @@ pub const Store = struct {
+         if (history_len == 0 and primary == 0) for (marks_) |at| {
+             if (at != s.active_rewind_at) primary = @max(primary, at);
+         };
++        primary = fit.primary(s, marks_, primary, from);
+         s.reserve(prompt, born, e, marks_, spans, primary);
+         const fitted = try @import("prompt_cache_reserve.zig").fitting(s, a, prompt, marks_, spans, e, born, primary);
+         if (e) |entry| entry.borrowers += 1;
+diff --git a/zig/src/core/prompt_cache_fit.zig b/zig/src/core/prompt_cache_fit.zig
+index 8fd9fb0..1dccbed 100644
+--- a/zig/src/core/prompt_cache_fit.zig
++++ b/zig/src/core/prompt_cache_fit.zig
+@@ -3,21 +3,68 @@ const std = @import("std");
+ const Allocator = std.mem.Allocator;
+ const pc = @import("prompt_cache.zig");
+ 
+-/// The marks the budget can hold (a new slice in `a`). Refuse the rest before any pass or peer copies them.
+-pub fn fitting(s: *pc.Store, a: Allocator, marks_: []const u32) ![]const u32 {
++/// TENSORFOLD_PROMPT_CACHE_PARTIAL=1, as the profile registry resolves it (exactly 1; unset, empty and 0 are off).
++pub fn partialFromEnv() bool {
++    return std.mem.eql(u8, @import("profile").get(.TENSORFOLD_PROMPT_CACHE_PARTIAL) orelse "", "1");
++}
++
++/// The marks the budget can hold (a new slice in `a`) for a pass from `from`. Refuse the rest before any pass or peer
++/// copies them; when every mark is refused and `s.partial` is on, an unplanned family keeps the furthest state past
++/// `from` the budget holds (it may evict every other state to make that room).
++pub fn fitting(s: *pc.Store, a: Allocator, marks_: []const u32, from: u32) ![]const u32 {
+     defer a.free(marks_);
+     var out: std.ArrayList(u32) = .empty;
++    var refused: ?u32 = null;
++    var kept: u32 = from; // the furthest mark the budget holds, or where the pass starts
++    var beside: u64 = 0; // the bytes of the marks kept: a pass's own states cannot evict each other
+     for (marks_) |at| {
+         if (s.hold) break; // memory pressure: the pass keeps nothing new, so none is planned
+         const bytes = s.family.vtable.bytes(s.family.ptr, at);
+-        if (bytes <= s.budget) try out.append(a, at) else {
++        if (bytes <= s.budget) {
++            try out.append(a, at);
++            kept = @max(kept, at);
++            beside += bytes;
++        } else {
+             s.counts.refused += 1;
++            refused = @min(refused orelse at, at);
+             pc.note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget{s}", .{ at, bytes >> 20, s.budget >> 20, s.over });
+         }
+     }
++    // states grow with their row, so every mark from `refused` on passes the budget and every kept one lies before it
++    if (s.partial and !s.rules.planned) if (refused) |at| if (furthest(s, kept, at, s.budget -| beside)) |near| {
++        try out.append(a, near);
++        pc.note("kept {d} of {d} tokens instead: the furthest state past {d} the budget holds", .{ near, at, kept });
++    };
+     return out.toOwnedSlice(a);
+ }
+ 
++/// The mark a guarded reservation makes room for: `endpoint`, or with `s.partial` and an endpoint past the whole
++/// budget, the furthest mark `fitting` kept in its place (none past `from`: the endpoint, which keeps nothing).
++pub fn primary(s: *const pc.Store, marks_: []const u32, endpoint: u32, from: u32) u32 {
++    if (!s.partial or marks_.len == 0 or s.family.vtable.bytes(s.family.ptr, endpoint) <= s.budget) return endpoint;
++    const last = std.mem.max(u32, marks_);
++    return if (last > from and last < endpoint) last else endpoint;
++}
++
++/// The furthest row past `from` and before `at` whose state `room` bytes hold, on a disk block's edge when one is
++/// past `from` (consecutive turns then share whole blocks); null when even `from + 1` passes `room`.
++fn furthest(s: *const pc.Store, from: u32, at: u32, room: u64) ?u32 {
++    const fits = struct {
++        fn f(st: *const pc.Store, n: u32, bytes: u64) bool {
++            return st.family.vtable.bytes(st.family.ptr, n) <= bytes;
++        }
++    }.f;
++    if (at <= from + 1 or !fits(s, from + 1, room)) return null;
++    var lo = from + 1; // fits
++    var hi = at; // passes
++    while (hi - lo > 1) {
++        const mid = lo + (hi - lo) / 2;
++        if (fits(s, mid, room)) lo = mid else hi = mid;
++    }
++    const edge = lo - lo % @import("rows_store.zig").block_tokens;
++    return if (edge > from) edge else lo;
++}
++
+ /// Fitted marks that the budget holds together: the history's first, then the rewind, then the rest in order.
+ pub fn fittingRewind(s: *pc.Store, a: Allocator, marks_: []const u32, endpoint: u32, rewind: u32, endpoint_bytes: u64) ![]const u32 {
+     defer a.free(marks_);
+diff --git a/zig/src/core/prompt_cache_queue_room_test.zig b/zig/src/core/prompt_cache_queue_room_test.zig
+index bf8b33d..f080c5f 100644
+--- a/zig/src/core/prompt_cache_queue_room_test.zig
++++ b/zig/src/core/prompt_cache_queue_room_test.zig
+@@ -105,3 +105,35 @@ test "queued cache: begin reserves the warm lookahead endpoint after releasing i
+     try std.testing.expectEqualSlices(u32, &.{19}, plan.marks);
+     try std.testing.expectEqual(@as(u64, 0), s.held);
+ }
++
++test "queued cache: TENSORFOLD_PROMPT_CACHE_PARTIAL's state takes the endpoint's room when the endpoint passes the budget" {
++    var f: Fake = .{ .gpa = a };
++    var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 110); // bytes 100 + at: 10 rows at most
++    defer s.deinit();
++    s.partial = true;
++    const other = [_]u32{ 9, 9, 9, 9, 9, 9 };
++    _ = f.pass(&s, &other, .{});
++    try std.testing.expect(s.keep(&other, 6, null, &.{}, &.{})); // another conversation's 106 bytes
++    s.reservation_guard = .{ .ctx = &f, .needed = idle };
++    const words = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 };
++    const l = try s.lookup(a, &words, 18, &.{}, &.{}, &.{});
++    defer a.free(l.marks);
++    try std.testing.expectEqualSlices(u32, &.{10}, l.marks); // the endpoint at 18 needs 118
++    _ = f.pass(&s, &words, .{ .marks = l.marks });
++    try std.testing.expectEqual(@as(usize, 1), s.entries.items.len);
++    try std.testing.expectEqual(@as(u32, 10), s.entries.items[0].at);
++}
++
++test "queued cache: TENSORFOLD_PROMPT_CACHE_PARTIAL's state fits beside the pass's other marks, which it cannot evict" {
++    var f: Fake = .{ .gpa = a };
++    var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 220); // bytes 100 + at
++    defer s.deinit();
++    s.partial = true;
++    const fitted = try pc.fit.fitting(&s, a, try a.dupe(u32, &.{ 3, 125 }), 0); // 103 fits, 225 passes the budget
++    defer a.free(fitted);
++    try std.testing.expectEqualSlices(u32, &.{ 3, 17 }, fitted); // 103 + 117 = 220
++    s.partial = false;
++    const plain = try pc.fit.fitting(&s, a, try a.dupe(u32, &.{ 3, 125 }), 0);
++    defer a.free(plain);
++    try std.testing.expectEqualSlices(u32, &.{3}, plain);
++}
+diff --git a/zig/src/core/prompt_cache_rewind_test.zig b/zig/src/core/prompt_cache_rewind_test.zig
+index b14b0a3..d00f5e6 100644
+--- a/zig/src/core/prompt_cache_rewind_test.zig
++++ b/zig/src/core/prompt_cache_rewind_test.zig
+@@ -201,3 +201,36 @@ test "the warm pass after a turn keeps that turn's rewind state, though it resum
+     try std.testing.expectEqual(@as(u32, 6), q.from);
+     try std.testing.expectEqual(fresh(&edited), f.pass(&s, &edited, q));
+ }
++
++test "TENSORFOLD_PROMPT_CACHE_PARTIAL: every mark past the budget: the furthest state the budget holds is kept, and the next turn resumes it" {
++    const gpa = std.testing.allocator;
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var f: Fake = .{ .gpa = gpa };
++    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_prompt = 0 }, 105); // bytes 100 + at: 5 rows at most
++    defer s.deinit();
++    s.partial = true;
++    const turn = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
++    const p = try s.begin(a, &turn, 8, &.{}, &.{}, null, &.{});
++    try std.testing.expectEqualSlices(u32, &.{5}, p.marks);
++    try std.testing.expectEqual(@as(u64, 1), s.counts.refused);
++    try std.testing.expectEqual(fresh(&turn), f.pass(&s, &turn, p));
++    const next = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
++    const q = try s.begin(a, &next, 10, &.{}, &.{}, null, &.{});
++    try std.testing.expectEqual(@as(u32, 5), q.from);
++    try std.testing.expectEqual(fresh(&next), f.pass(&s, &next, q));
++}
++
++test "a planned family keeps nothing when every mark passes the budget: its states sit on chunk starts only" {
++    const gpa = std.testing.allocator;
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    var f: Fake = .{ .gpa = gpa };
++    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .planned = true, .grid = 4, .min_prompt = 0 }, 103);
++    defer s.deinit();
++    s.partial = true;
++    const turn = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
++    const p = try s.begin(arena.allocator(), &turn, 8, &.{}, &.{}, null, &.{});
++    try std.testing.expectEqual(@as(usize, 0), p.marks.len);
++}
+diff --git a/zig/src/native/cuda_kv_pool.zig b/zig/src/native/cuda_kv_pool.zig
+index 40e4799..ce90043 100644
+--- a/zig/src/native/cuda_kv_pool.zig
++++ b/zig/src/native/cuda_kv_pool.zig
+@@ -241,6 +241,7 @@ pub fn kept(comptime F: type, loaded: anytype, paged: ?Plan, o: api.Open, room:
+ pub fn store(comptime F: type, s: *api.prompt_cache.Store, loaded: anytype, k: Kept) !void {
+     s.over = @import("cuda_prompt_pages.zig").hint(F, loaded); // a state past the budget: the setting keeping it
+     s.keep_others = api.prompt_cache.others.fromEnv(); // =1: a new state evicts only its own conversation's states
++    s.partial = api.prompt_cache.fit.partialFromEnv(); // =1: a prompt past the budget keeps the furthest state that fits
+     if (comptime !@hasDecl(F, "snap_slots")) return;
+     if (comptime @hasDecl(F, "snap_place")) F.snap_place(loaded.target, k.host);
+     s.most = if (k.host) k.most else k.snaps;
+diff --git a/zig/src/platform/environment.zig b/zig/src/platform/environment.zig
+index 4738441..eaa6302 100644
+--- a/zig/src/platform/environment.zig
++++ b/zig/src/platform/environment.zig
+@@ -47,6 +47,7 @@ pub const rules = [_]Rule{
+     .{ .name = "TF_DRAFT_NODES", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size node count (capped by the drafter's window)" },
+     .{ .name = "TF_QMMF_HALF_BELOW", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size block count (0 disables half tiles)" },
+     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
++    .{ .name = "TENSORFOLD_PROMPT_CACHE_PARTIAL", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
+     .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
+     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .scope = .gemma4, .kind = .size, .forms = "a solo prompt pass's rows, a multiple of 512 up to 4096" },
+     .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
+diff --git a/zig/src/platform/environment_test.zig b/zig/src/platform/environment_test.zig
+index 7263482..d226f1e 100644
+--- a/zig/src/platform/environment_test.zig
++++ b/zig/src/platform/environment_test.zig
+@@ -63,6 +63,8 @@ const valid = [_]Case{
+     .{ .name = "TF_QMMF_HALF_BELOW", .raw = "0", .n = 0 },
+     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "0", .n = 0 },
+     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "1", .n = 1 },
++    .{ .name = "TENSORFOLD_PROMPT_CACHE_PARTIAL", .raw = "0", .n = 0 },
++    .{ .name = "TENSORFOLD_PROMPT_CACHE_PARTIAL", .raw = "1", .n = 1 },
+     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
+     .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },
+     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "0", .n = 0 },
+@@ -215,16 +217,17 @@ test "environment: word switches take 0 and 1 and the word forms in any case; ex
+     try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_KV_SPLIT", "true"));
+ }
+ 
+-test "environment: the keep-others switch is exact 0 or 1, checked when the CUDA backend starts" {
+-    const name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS";
+-    for ([_][]const u8{ "true", "on", "yes", "01", " 1", "1 ", "2" }) |raw| {
+-        try t.expectError(error.InvalidEnvironment, e.parse(name, raw));
+-        const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })).?;
+-        a.free(why);
+-        try t.expect((try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .metal = true })) == null);
++test "environment: the keep-others and partial switches are exact 0 or 1, checked when the CUDA backend starts" {
++    for ([_][:0]const u8{ "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", "TENSORFOLD_PROMPT_CACHE_PARTIAL" }) |name| {
++        for ([_][]const u8{ "true", "on", "yes", "01", " 1", "1 ", "2" }) |raw| {
++            try t.expectError(error.InvalidEnvironment, e.parse(name, raw));
++            const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })).?;
++            a.free(why);
++            try t.expect((try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .metal = true })) == null);
++        }
++        try t.expect(!try e.value(bool, name, null, false));
++        try t.expect(try e.value(bool, name, "1", false));
+     }
+-    try t.expect(!try e.value(bool, name, null, false));
+-    try t.expect(try e.value(bool, name, "1", false));
+ }
+ 
+ test "environment: real settings are finite, keep their lower bound and optional cap, and read as floats" {
