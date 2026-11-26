@@ -9,8 +9,11 @@ Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:
 Over 72 hours of the lab's traffic (1,255 requests), 86% of the engine's busy time was prefill (17.9 h against 2.8 h of decode) and only
 36% of prompt tokens came from the cache: `kept nothing at 135322 tokens: 2199 MiB passes the 2110 MiB budget`, so every turn of a 160k
 to 230k-token agent session prefilled from its first token (about 105 s). Changes, none of which change a reply:
-- `PROMPT_CACHE_GIB=8` in the lab's `.env` (3.5 to 4 GiB after the engine's halving, 1,386 pages instead of 1,543). A 122k-token session's
-  next turns: 0.31 s to the first token instead of 58.9 s, `cached` 122,665 of 122,692.
+- `PROMPT_CACHE_GIB=8` (3.5 to 4 GiB after the engine's halving): a 122k-token session's next turns took 0.31 s to the first token
+  instead of 58.9 s, `cached` 122,665 of 122,692. Not kept: with the Spark's other services up, a full cache beside one 190k-token
+  stream took free memory to 4.7 to 6.7 GiB, under memguard's 7 GiB floor, and on one run memguard restarted the container, which then
+  could not start beside those services (`--parallel 15 needs 6.50 GiB ... leaves 0.00 GiB`) until `restart.sh` paused them. The lab
+  stays at `PROMPT_CACHE_GIB=4` (2.1 GiB); with `0013` a 189k-token session's next turn resumes at 122,368 (37 s instead of 93 s).
 - `0013`, `TENSORFOLD_PROMPT_CACHE_PARTIAL=1` (registry switch, off upstream, on in `scripts/config.sh`): a prompt whose every mark passes
   the budget keeps the furthest state the budget holds beside the pass's other marks, and a guarded reservation makes room for it in the
   endpoint's place. A 239,722-token session's next turns resumed at 222,976: 17 s to the first token instead of 118 s. Tests: two in

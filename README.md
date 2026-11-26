@@ -54,8 +54,10 @@ The lab's patches `0006` to `0013` sit on top of MiaAI-Lab's series (see `CREDIT
   before this: 86% of the engine's busy time was prefill, and 517 of 1,086 prompts over 64k tokens kept nothing, because a kept state
   costs about 16 KiB a token and the 2.1 GiB cache held nothing past about 130k tokens. Each turn of a 170k-token agent session then
   waited about 105 s for its first token.
-  - `PROMPT_CACHE_GIB=8`: the engine gives the cache at most half of what is free once the pages are taken, so asking for 8 gives
-    3.5 to 4 GiB (one state up to about 220k tokens) and the pool 1,386 pages instead of 1,543.
+  - `PROMPT_CACHE_GIB`: the engine gives the cache at most half of what is free once the pages are taken. `8` gives 3.5 to 4 GiB
+    (a whole state up to about 220k tokens: a 122k-token session's next turn took 0.31 s instead of 58.9 s), but with the Spark's
+    other services up a full cache and one 190k-token stream took free memory under memguard's 7 GiB floor, so the lab stays at `4`
+    (2.1 GiB) until those services leave more room; with `0013` a 189k-token turn then resumes at 122k (37 s instead of 93 s).
   - `TENSORFOLD_PROMPT_CACHE_PARTIAL=1` (`0013`): a prompt whose every state passes the budget keeps the furthest one the budget
     holds beside the pass's other states, on a 256-token block edge, so its next turn prefills only the rest. Upstream keeps nothing.
   - `SPILL_GIB=64`: TensorFold's own disk tier (`--spill-gib`) for states pushed out of RAM, and those in RAM at a planned stop, under
@@ -66,9 +68,8 @@ The lab's patches `0006` to `0013` sit on top of MiaAI-Lab's series (see `CREDIT
     copy in memory; the cost is that an eviction writes on the engine thread, about 1 to 3 s for a 1.6 GiB state.
 
 The lab's Spark runs `PARALLEL=15`, `TF_FLASHNEXT_KV_PAGES=256`, `TF_FLASHNEXT_KV4=values`, `TENSORFOLD_MEMORY_RESERVE_GIB=12`,
-`PROMPT_CACHE_GIB=8`, `SPILL_GIB=64`, `PDF=1`, `VIDEO=1`, beside about 8 GiB of other services: 1,386 pages (about 355k tokens) beside the
-engine's own 262,144-token window and a 3.5 to 4 GiB prompt cache. The table below is from the v1.2.7 port (`PROMPT_CACHE_GIB=4`, 1,621
-pages and a 2.1 GiB cache, with 9.5 GiB or more free under the stress runs). Against the lab's v1.2.2 build
+`PROMPT_CACHE_GIB=4`, `SPILL_GIB=64`, `PDF=1`, `VIDEO=1`, beside about 10 GiB of other services: 1,543 to 1,941 pages (the count follows
+what is free at the load) beside the engine's own 262,144-token window and a 2.1 GiB prompt cache. Against the lab's v1.2.2 build
 (same pool, `tools/bench_streams.py`, 256 tokens, greedy, median of 3; 5 runs at 12 and 15 streams):
 
 | | v1.2.2 lab build | this build |
