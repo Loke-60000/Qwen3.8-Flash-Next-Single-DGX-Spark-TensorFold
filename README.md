@@ -56,7 +56,8 @@ The lab's patches `0006` to `0013` sit on top of MiaAI-Lab's series (see `CREDIT
   text, no other weights, and a text route refuses them. A decision runs in steps beside decoding requests and takes at
   most `TENSORFOLD_DECISION_SHARE` (10%) of the engine's time: a request decoding 75.7 tok/s alone kept 72.4 beside
   back-to-back decisions (6.6 before). A decision answers in 0.16 s on a short input and 0.84 s on 1,806 tokens when
-  idle, 4.3 s under that load. `tools/decision_bench.py` measures it.
+  idle, 4.3 s under that load. A request's questions read their shared input once (`0017`): 8 questions on a 1,809-token
+  input take 1.61 s instead of 6.67. `tools/decision_bench.py` measures it.
 - **French and German draft faster** (`0014`, `DRAFT_VOCAB`): TensorFold's built-in draft list covers English and code but
   only 79% of French tokens and 70% of German ones, and a token the head cannot propose ends its chain. `DRAFT_VOCAB` picks
   the list (empty: built-in, `all`, or a file); the lab serves `scripts/draft-vocab-fr-de.txt` (99,912 ids, see

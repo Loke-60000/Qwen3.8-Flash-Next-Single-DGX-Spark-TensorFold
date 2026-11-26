@@ -5,6 +5,11 @@ Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:
 
 ## Unreleased
 
+**2026-11-26: a decision's questions read their shared input once (`0017`).** Each question used to prefill the whole
+input again (0.83 s a question on a 1,809-token input). The questions' common prompt start is now fed once, its caches
+kept, and each question read from a copy: 1 / 4 / 8 questions take 0.92 / 1.22 / 1.61 s instead of 0.85 / 3.34 / 6.67,
+with the same probabilities; a request decoding beside back-to-back decisions keeps 72.5 of 75.8 tok/s; `exact.py` passes.
+
 **2026-11-26: decision model ids (`0015`, `0016`).** TensorFold v1.2.7 already served `/v1/decisions` and `/v1/systemone`
 on Flash Next through its score hook, but a score ran whole on the engine thread (a request decoding 77.6 tok/s fell to
 6.6 beside back-to-back 1,773-token decisions), read only the stock model, and had no model id of its own. `0015` takes

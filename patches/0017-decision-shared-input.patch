@@ -1,0 +1,449 @@
+diff --git a/docs/api.md b/docs/api.md
+index 2645c0920..dc9345c3c 100644
+--- a/docs/api.md
++++ b/docs/api.md
+@@ -172,7 +172,9 @@ route refuses it with HTTP 400. A request naming an identity id itself scores th
+ Flash Next on CUDA takes a score in steps between decode rounds: while other streams decode, a round's steps feed at
+ most `TENSORFOLD_DECISION_ROWS` prompt rows between the running scores (256 by default), and steps take at most
+ `TENSORFOLD_DECISION_SHARE` of the engine's time (0.1 by default), so the streams keep decoding; with nothing decoding
+-a score runs whole. On a GB10, a stream decoding 75.7 tok/s alone decoded 72.4 beside back-to-back decisions on a
++a score runs whole. A request's questions share their prompt's start (the chat template's opening and the input),
++which Flash Next reads once and keeps, then reads each question from a copy of that state: on a GB10, 8 questions on a
++1,809-token input took 1.61 s instead of 6.67. On a GB10, a stream decoding 75.7 tok/s alone decoded 72.4 beside back-to-back decisions on a
+ 1,806-token input, which took 4.3 s each meanwhile and 0.84 s on an idle server. A decision's own cache sits outside the streams' memory plan, so a prompt
+ longer than `TENSORFOLD_DECISION_MAX_TOKENS` (16,384 by default) fails with HTTP 500.
+ 
+diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
+index 3d243d5e7..db46682fb 100644
+--- a/zig/src/core/engine_api.zig
++++ b/zig/src/core/engine_api.zig
+@@ -381,6 +381,8 @@ pub const Decision = struct {
+     read: usize = 0, // out: the trunk's tokens with its pictures expanded, plus every branch's
+     problem: []const u8 = "", // out: why the engine refused (error.Refused), in `arena`
+     arena: ?std.mem.Allocator = null, // the request's, for what the engine hands back
++    identity: u8 = 0, // the identity whose rows read it (TENSORFOLD_IDENTITIES' 1..n), 0 the stock model
++    logsumexp: []f64 = &.{}, // out, when given: each branch's vocabulary logsumexp at its label row
+ };
+ 
+ /// An opened engine; ``close`` stops its thread and frees its backend.
+diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
+index c20351c7f..6c2a047cd 100644
+--- a/zig/src/core/lane_host.zig
++++ b/zig/src/core/lane_host.zig
+@@ -157,7 +157,8 @@ pub const LaneHost = struct {
+     pub fn engine(h: *LaneHost) Engine {
+         // decisions' label scores only when the backend gives them, so the route refuses as before otherwise
+         const vt = h.core.backend.vtable;
+-        return .{ .ctx = h, .vtable = if (vt.score != null and vt.decide != null) &decided_vtable else if (vt.score != null) &scored_vtable else &plain_vtable };
++        // a backend scoring in steps answers packed decisions through them (lane_host_score.zig)
++        return .{ .ctx = h, .vtable = if (vt.score != null and (vt.decide != null or vt.score_step != null)) &decided_vtable else if (vt.score != null) &scored_vtable else &plain_vtable };
+     }
+ 
+     const plain_vtable: Engine.VTable = .{
+diff --git a/zig/src/core/lane_host_score.zig b/zig/src/core/lane_host_score.zig
+index 9bd0b9ea6..df3a212a8 100644
+--- a/zig/src/core/lane_host_score.zig
++++ b/zig/src/core/lane_host_score.zig
+@@ -19,7 +19,8 @@ pub const Ask = struct {
+     labels: []const u32,
+     logits: []f64,
+     mass: bool = false,
+-    identity: u8 = 0, // the identity its request named (scoreAs), 0 the stock model
++    identity: u8 = 0, // the identity its request named (scoreAs, Decision.identity), 0 the stock model
++    branch_lse: []f64 = &.{}, // a decision's per-branch logsumexp, when asked
+     job: ?ScoreJob = null, // a score the backend takes in steps (score_step), from its first step to its last
+     branches: []const []const u32 = &.{},
+     counts: []const usize = &.{},
+@@ -66,7 +67,7 @@ pub fn decide(ctx: *anyopaque, d: *api.Decision) error{ Failed, Refused }!void {
+         d.problem = "this engine reads text only: a decision with pictures is not supported";
+         return error.Refused;
+     }
+-    var ask: Ask = .{ .kind = .decide, .prompt = d.trunk, .labels = d.labels, .logits = d.logits, .branches = d.branches, .counts = d.counts };
++    var ask: Ask = .{ .kind = .decide, .prompt = d.trunk, .labels = d.labels, .logits = d.logits, .branches = d.branches, .counts = d.counts, .identity = d.identity, .branch_lse = d.logsumexp };
+     try put(h, &ask);
+     if (ask.refused) {
+         d.problem = ask.problem;
+@@ -122,19 +123,21 @@ pub fn answerWith(h: *LaneHost, rows: ?usize) void {
+     defer finished.deinit(h.gpa);
+     if (backend.vtable.score_step) |step| {
+         var budget = rows;
+-        for (list) |a| if (a.kind == .score) {
+-            if (a.prompt.len > envSize("TENSORFOLD_DECISION_MAX_TOKENS", max_tokens_default)) {
++        for (list) |a| {
++            var longest: usize = 0;
++            for (a.branches) |b| longest = @max(longest, b.len);
++            if (a.prompt.len + longest > envSize("TENSORFOLD_DECISION_MAX_TOKENS", max_tokens_default)) {
+                 std.log.warn("lane host: a decision of {d} prompt tokens passes TENSORFOLD_DECISION_MAX_TOKENS", .{a.prompt.len});
+                 a.failed = true;
+                 finished.append(h.gpa, a) catch {};
+                 continue;
+             }
+-            a.job = .{ .prompt = a.prompt, .labels = a.labels, .logits = a.logits, .mass = a.mass, .identity = a.identity };
++            a.job = .{ .prompt = a.prompt, .labels = a.labels, .logits = a.logits, .mass = a.mass or a.branch_lse.len > 0, .identity = a.identity, .branches = a.branches, .counts = a.counts, .branch_lse = a.branch_lse };
+             h.scores.running.append(h.gpa, a) catch {
+                 a.failed = true;
+                 finished.append(h.gpa, a) catch {};
+             };
+-        };
++        }
+         var i: usize = 0;
+         while (i < h.scores.running.items.len) {
+             if (budget != null and budget.? == 0) break;
+@@ -158,7 +161,7 @@ pub fn answerWith(h: *LaneHost, rows: ?usize) void {
+         }
+     }
+     for (list) |a| {
+-        if (a.kind == .score and backend.vtable.score_step != null) continue; // taken above
++        if (backend.vtable.score_step != null) continue; // taken above, decisions packed or not
+         defer finished.append(h.gpa, a) catch {};
+         // a drain's deadline stops the queue: the started score finishes, the rest fail without running
+         h.lock();
+diff --git a/zig/src/core/lane_host_score_test.zig b/zig/src/core/lane_host_score_test.zig
+index 62fbb6ba6..965d5fbe0 100644
+--- a/zig/src/core/lane_host_score_test.zig
++++ b/zig/src/core/lane_host_score_test.zig
+@@ -234,6 +234,16 @@ const Stepper = struct {
+         job.fed += if (job.rows == 0) left else @min(left, job.rows);
+         job.state = @ptrFromInt(0x10); // a cache held between steps
+         if (job.fed < job.prompt.len) return false;
++        if (job.branches.len > 0) { // packed: branch i's labels score trunk + branch length + j + 100 x identity
++            var at: usize = 0;
++            for (job.branches, job.counts, 0..) |b, n, i| {
++                for (job.logits[at..][0..n], 0..) |*v, j| v.* = @floatFromInt(job.prompt.len + b.len + j + 100 * @as(usize, job.identity));
++                if (job.branch_lse.len > 0) job.branch_lse[i] = 7.5 + @as(f64, @floatFromInt(i));
++                at += n;
++            }
++            job.state = null;
++            return true;
++        }
+         job.state = null;
+         for (job.logits, 0..) |*v, i| v.* = @floatFromInt(job.prompt.len + i + 100 * @as(usize, job.identity));
+         job.logsumexp = if (job.mass) 7.5 else 0;
+@@ -366,3 +376,28 @@ test "score steps beside decoding streams take TENSORFOLD_DECISION_SHARE of the
+     try std.testing.expectEqual(@as(i96, 0), scoring.owed(100, 1)); // no share: steps every round
+     try std.testing.expectEqual(@as(i96, 0), scoring.owed(0, 0.1));
+ }
++
++test "a packed decision runs through the steps of a backend that has no decide of its own, per branch and identity" {
++    const gpa = std.testing.allocator;
++    var cfg = try lanes.Config.init(gpa, .{}, 1, 0);
++    defer cfg.deinit(gpa);
++    var target: lanes.fake.Fake = .{ .gpa = gpa };
++    defer target.deinit();
++    var vt: lanes.backend.Backend.VTable = undefined;
++    var clock: lanes.fake.FixedClock = .{};
++    var core: lanes.Engine = undefined;
++    var host = stepperHost(gpa, &cfg, &target, &vt, &clock, &core);
++    defer core.deinit();
++    vt.score = Scorer.score; // the engine offers decisions only beside a score
++    try host.start();
++    defer host.stop();
++    const engine = host.engine();
++    try std.testing.expect(engine.vtable.decide != null);
++    var logits: [3]f64 = undefined;
++    var lse: [2]f64 = undefined;
++    var d: api.Decision = .{ .trunk = &.{ 1, 2, 3, 4 }, .branches = &.{ &.{ 5, 6 }, &.{7} }, .counts = &.{ 2, 1 }, .labels = &.{ 8, 9, 10 }, .logits = &logits, .identity = 1, .logsumexp = &lse };
++    try engine.decide(&d);
++    try std.testing.expectEqualSlices(f64, &.{ 106, 107, 105 }, &logits);
++    try std.testing.expectEqualSlices(f64, &.{ 7.5, 8.5 }, &lse);
++    try std.testing.expectEqual(@as(usize, 7), d.read);
++}
+diff --git a/zig/src/core/lanes/backend.zig b/zig/src/core/lanes/backend.zig
+index b09a713b7..27a53dfba 100644
+--- a/zig/src/core/lanes/backend.zig
++++ b/zig/src/core/lanes/backend.zig
+@@ -84,6 +84,13 @@ pub const ScoreJob = struct {
+     fed: usize = 0,
+     state: ?*anyopaque = null,
+     logsumexp: f64 = 0,
++    /// A packed decision (Engine.decide): `prompt` is the questions' shared trunk, fed once, and branch i a question's own
++    /// tokens after it, read from the trunk's state; `counts[i]` of `labels` and `logits` are branch i's, and
++    /// `branch_lse[i]` its logsumexp when given. Each branch counts its rows against `rows`.
++    branches: []const []const u32 = &.{},
++    counts: []const usize = &.{},
++    branch_lse: []f64 = &.{},
++    branch: usize = 0, // the next branch to answer
+ };
+ pub const RoundObserver = struct { ptr: *anyopaque, done: *const fn (*anyopaque, []const []const u32) void };
+ 
+diff --git a/zig/src/families/flashnext/cuda_score.zig b/zig/src/families/flashnext/cuda_score.zig
+index e01b7d69d..2aa78cb28 100644
+--- a/zig/src/families/flashnext/cuda_score.zig
++++ b/zig/src/families/flashnext/cuda_score.zig
+@@ -2,6 +2,7 @@
+ const std = @import("std");
+ const prompt = @import("cuda_prompt.zig");
+ const mtp = @import("cuda_mtp.zig");
++const cuda = @import("cuda");
+ 
+ /// One logit per label at the row after `ids` (bf16 widened), and the row's logsumexp in f64 when `mass` (else 0).
+ pub fn labels(comptime Tri: type, e: *prompt.Engine, tri: Tri, context: usize, ids: []const u32, wanted: []const u32, logits: []f64, mass: bool) !f64 {
+@@ -22,45 +23,108 @@ pub fn labels(comptime Tri: type, e: *prompt.Engine, tri: Tri, context: usize, i
+ 
+ const ScoreJob = @import("lanes").backend.ScoreJob;
+ 
++/// A score's caches between its steps: `main` takes the prompt, then each branch; `trunk` keeps the shared trunk's state
++/// for the branches (a packed decision's only).
++const Held = struct { main: prompt.Seq, trunk: ?prompt.Seq = null };
++
+ /// One step of a decision's score (lanes ScoreJob), as `labels` scores it whole: the first step makes the decision's own
+-/// cache with its identity's rows, each feeds `job.rows` more prompt rows (0: the rest), and the last reads the labels
+-/// and frees the cache. Prompt fill gives the same rows at any cut, so the steps' answer is the whole pass's.
++/// caches with its identity's rows, each feeds `job.rows` more rows (0: the rest), and the last reads the labels and
++/// frees the caches. A packed decision feeds its trunk once, keeps that state, then runs each branch from a copy of it.
++/// Prompt fill gives the same rows at any cut, so the steps' answers are the whole passes'.
+ pub fn stepJob(comptime Tri: type, e: *prompt.Engine, tri: Tri, context: usize, job: *ScoreJob) !bool {
+     const ids = job.prompt;
+     if (job.state == null) {
+         // every refusal before a cache is made
+-        if (ids.len == 0 or ids.len > context or ids.len > prompt.max_tokens) return error.PromptOutsideContext;
++        var longest: usize = 0;
++        var labelled: usize = 0;
++        for (job.branches) |b| {
++            if (b.len == 0) return error.EmptyBranch;
++            longest = @max(longest, b.len);
++        }
++        for (job.counts) |c| labelled += c;
++        const cap = ids.len + longest;
++        if (ids.len == 0 or cap > context or cap > prompt.max_tokens) return error.PromptOutsideContext;
+         if (job.labels.len == 0 or job.labels.len != job.logits.len) return error.UnexpectedTensor;
++        if (job.branches.len > 0 and (job.counts.len != job.branches.len or labelled != job.labels.len)) return error.UnexpectedTensor;
++        if (job.branch_lse.len != 0 and job.branch_lse.len != job.branches.len) return error.UnexpectedTensor;
+         for (job.labels) |t| if (t >= prompt.vocabulary) return error.LabelOutsideVocabulary;
+-        const seq = try e.gpa.create(prompt.Seq);
+-        errdefer e.gpa.destroy(seq);
+-        seq.* = try e.newSeq(ids.len);
+-        seq.identity = job.identity;
+-        job.state = seq;
++        const held = try e.gpa.create(Held);
++        errdefer e.gpa.destroy(held);
++        held.* = .{ .main = try e.newSeq(cap) };
++        held.main.identity = job.identity;
++        job.state = held;
+     }
+     errdefer dropJob(e, job);
+-    const seq: *prompt.Seq = @ptrCast(@alignCast(job.state.?));
+-    const left = ids.len - job.fed;
+-    const n = if (job.rows == 0) left else @min(left, job.rows);
+-    const last = n == left;
+-    try e.forward(Tri, tri, seq, ids[job.fed..][0..n], .{ .logits = if (last) .last else .none });
+-    job.fed += n;
+-    if (!last) return false;
+-    const row = std.mem.bytesAsSlice(u16, seq.logits[0 .. prompt.vocabulary * 2]);
+-    for (job.labels, job.logits) |t, *v| {
+-        v.* = mtp.promote(std.mem.littleToNative(u16, row[t]));
+-        if (!std.math.isFinite(v.*)) return error.NonFiniteScore;
++    const held: *Held = @ptrCast(@alignCast(job.state.?));
++    if (job.fed < ids.len) {
++        const left = ids.len - job.fed;
++        const n = if (job.rows == 0) left else @min(left, job.rows);
++        const last = n == left;
++        try e.forward(Tri, tri, &held.main, ids[job.fed..][0..n], .{ .logits = if (last and job.branches.len == 0) .last else .none });
++        job.fed += n;
++        if (!last) return false;
++        if (job.branches.len == 0) {
++            try read(&held.main, job.labels, job.logits);
++            job.logsumexp = if (job.mass) try logsumexp(lastRow(&held.main)) else 0;
++            dropJob(e, job);
++            return true;
++        }
++        held.trunk = try e.newSeq(held.main.cap);
++        try copySeq(e, &held.trunk.?, &held.main);
++        if (job.rows != 0) return false; // the branches from the next round on
++    }
++    // branches: each from the trunk's state, as many as this step's rows hold (at least one)
++    var spent: usize = 0;
++    var at: usize = 0;
++    for (job.counts[0..job.branch]) |c| at += c;
++    while (job.branch < job.branches.len) {
++        const b = job.branches[job.branch];
++        if (spent > 0 and job.rows != 0 and spent + b.len > job.rows) return false;
++        try e.forward(Tri, tri, &held.main, b, .{});
++        const n = job.counts[job.branch];
++        try read(&held.main, job.labels[at..][0..n], job.logits[at..][0..n]);
++        if (job.branch_lse.len > 0) job.branch_lse[job.branch] = try logsumexp(lastRow(&held.main));
++        try copySeq(e, &held.main, &held.trunk.?);
++        at += n;
++        spent += b.len;
++        job.branch += 1;
+     }
+-    job.logsumexp = if (job.mass) try logsumexp(row) else 0;
+     dropJob(e, job);
+     return true;
+ }
+ 
+-/// Frees a score's cache between its steps (or after its last); none held: nothing to do.
++fn lastRow(seq: *const prompt.Seq) []align(1) const u16 {
++    return std.mem.bytesAsSlice(u16, seq.logits[0 .. prompt.vocabulary * 2]);
++}
++
++/// One logit per label from `seq`'s last row (bf16 widened); a non-finite score is refused.
++fn read(seq: *const prompt.Seq, wanted: []const u32, logits: []f64) !void {
++    const r = lastRow(seq);
++    for (wanted, logits) |t, *v| {
++        v.* = mtp.promote(std.mem.littleToNative(u16, r[t]));
++        if (!std.math.isFinite(v.*)) return error.NonFiniteScore;
++    }
++}
++
++/// `dst` as `src` stands: every cache buffer copied on the engine's stream, the n-gram history and the rows fed. Both are
++/// the same engine's contiguous caches at one capacity, so the buffers match one for one.
++fn copySeq(e: *prompt.Engine, dst: *prompt.Seq, src: *const prompt.Seq) !void {
++    if (dst.cap != src.cap or dst.paged != null or src.paged != null or src.media != null) return error.UnexpectedTensor;
++    for ([_][]cuda.DeviceBuffer{ dst.conv, dst.state, dst.kc, dst.vc, dst.ikc, dst.pooled }, [_][]cuda.DeviceBuffer{ src.conv, src.state, src.kc, src.vc, src.ikc, src.pooled }) |to, from| {
++        if (to.len != from.len) return error.UnexpectedTensor;
++        for (to, from) |d, s| try d.copyFrom(0, s.ptr, s.len, e.stream.handle);
++    }
++    try dst.tail.copyFrom(0, src.tail.ptr, src.tail.len, e.stream.handle);
++    dst.history = src.history;
++    dst.fed = src.fed;
++}
++
++/// Frees a score's caches between its steps (or after its last); none held: nothing to do.
+ pub fn dropJob(e: *prompt.Engine, job: *ScoreJob) void {
+-    const seq: *prompt.Seq = @ptrCast(@alignCast(job.state orelse return));
+-    seq.deinit(e.gpa);
+-    e.gpa.destroy(seq);
++    const held: *Held = @ptrCast(@alignCast(job.state orelse return));
++    held.main.deinit(e.gpa);
++    if (held.trunk) |*t| t.deinit(e.gpa);
++    e.gpa.destroy(held);
+     job.state = null;
+ }
+ 
+diff --git a/zig/src/server/decisions.zig b/zig/src/server/decisions.zig
+index 1ad86f5f5..861b7b023 100644
+--- a/zig/src/server/decisions.zig
++++ b/zig/src/server/decisions.zig
+@@ -1,6 +1,7 @@
+ //! /v1/decisions checks a body the way 0.6.6 checks it, then scores through the engine hook when a family sets one.
+ const std = @import("std");
+ const json = @import("json");
++const api = @import("engine_api");
+ const errors = @import("errors.zig");
+ const fields = @import("fields.zig");
+ const pyrepr = @import("pyrepr.zig");
+@@ -358,6 +359,7 @@ fn labelRefuse(cx: *Cx, label: []const u8) errors.Refused {
+ 
+ fn scoreAll(srv: *Server, cx: *Cx, prepared: []const Prepared, identity: u8) errors.Refused![]Scored {
+     const scored = try cx.a.alloc(Scored, prepared.len);
++    if (try asOne(srv, cx, prepared, identity, scored)) return scored;
+     for (prepared, scored) |item, *row| {
+         const logits = try cx.a.alloc(f64, item.label_ids.len);
+         @memset(logits, 0);
+@@ -370,6 +372,42 @@ fn scoreAll(srv: *Server, cx: *Cx, prepared: []const Prepared, identity: u8) err
+     return scored;
+ }
+ 
++/// Every question in one packed decision when the engine takes them (Engine.decide): the prompts' shared start (the chat
++/// template's opening and the input) is read once and each question's own tokens after it; false: score one by one.
++fn asOne(srv: *Server, cx: *Cx, prepared: []const Prepared, identity: u8, scored: []Scored) errors.Refused!bool {
++    if (srv.engine.vtable.decide == null or prepared.len == 0) return false;
++    const first = prepared[0].prompt_ids;
++    var trunk = first.len;
++    for (prepared) |p| {
++        trunk = @min(trunk, std.mem.indexOfDiff(u32, first, p.prompt_ids) orelse first.len);
++        trunk = @min(trunk, p.prompt_ids.len - 1); // each question keeps a token of its own
++    }
++    if (trunk == 0) return false;
++    const branches = try cx.a.alloc([]const u32, prepared.len);
++    const counts = try cx.a.alloc(usize, prepared.len);
++    var labels: std.ArrayList(u32) = .empty;
++    for (prepared, branches, counts) |p, *b, *n| {
++        b.* = p.prompt_ids[trunk..];
++        n.* = p.label_ids.len;
++        try labels.appendSlice(cx.a, p.label_ids);
++    }
++    const logits = try cx.a.alloc(f64, labels.items.len);
++    @memset(logits, 0);
++    const lse = try cx.a.alloc(f64, prepared.len);
++    var d: api.Decision = .{ .trunk = first[0..trunk], .branches = branches, .counts = counts, .labels = labels.items, .logits = logits, .identity = identity, .logsumexp = lse, .arena = cx.a };
++    srv.engine.decide(&d) catch |e| switch (e) {
++        error.Unsupported => return false,
++        error.Refused => return cx.refuse(d.problem),
++        error.Failed => return cx.fail(.server, "decision scoring failed", .{}),
++    };
++    var at: usize = 0;
++    for (scored, counts, lse) |*row, n, s| {
++        row.* = .{ .logits = logits[at..][0..n], .logsumexp = s };
++        at += n;
++    }
++    return true;
++}
++
+ fn build(cx: *Cx, body: Value, prepared: []const Prepared, scored: []const Scored) errors.Refused!Value {
+     const a = cx.a;
+     const temperature = if (body.get("temperature")) |v| v.float64().? else 1;
+diff --git a/zig/src/server/decisions_test.zig b/zig/src/server/decisions_test.zig
+index 7bd56aa1e..0d7128535 100644
+--- a/zig/src/server/decisions_test.zig
++++ b/zig/src/server/decisions_test.zig
+@@ -66,6 +66,8 @@ const Backend = struct {
+     prompt_len: usize = 0,
+     label_len: usize = 0,
+     identity: ?u8 = null, // the identity the last scoreAs read
++    trunk_len: usize = 0, // the last packed decision's trunk
++    decides: usize = 0,
+ 
+     fn engine(b: *Backend) api.Engine {
+         return .{ .ctx = b, .vtable = if (b.hooked) &hooked_vt else &bare_vt };
+@@ -304,3 +306,44 @@ test "TENSORFOLD_DECISION_IDS: a decision id scores through its base's identity,
+     try std.testing.expectEqual(@as(?u8, 1), server_mod.decisionOf(config, (try json.parse(a, "{\"model\":\"m-skuld-decision\"}")).ok));
+     try std.testing.expectEqual(@as(?u8, null), server_mod.decisionOf(config, (try json.parse(a, "{\"model\":\"m-skuld\"}")).ok));
+ }
++
++fn decide(ctx: *anyopaque, d: *api.Decision) error{ Failed, Refused }!void {
++    const b: *Backend = @ptrCast(@alignCast(ctx));
++    b.decides += 1;
++    b.trunk_len = d.trunk.len;
++    b.identity = d.identity;
++    var at: usize = 0;
++    for (d.counts, 0..) |n, i| { // question 0 prefers its first label, question 1 its second
++        for (d.logits[at..][0..n], 0..) |*v, j| v.* = if (j == i) 3 else 0;
++        if (d.logsumexp.len > 0) d.logsumexp[i] = 4;
++        at += n;
++    }
++}
++
++const packed_vt: api.Engine.VTable = .{ .info = Backend.info, .submit = Backend.submit, .cancel = Backend.cancel, .status = Backend.status, .memory = Backend.memory, .score = Backend.score, .score_as = scoreAs, .decide = decide };
++
++test "a packed engine reads the questions' shared prompt start once: one decision, each question after the trunk" {
++    var text: ByteText = .{};
++    var backend: Backend = .{ .hooked = true };
++    const srv = try Server.init(std.testing.allocator, std.testing.io, .{ .ctx = &backend, .vtable = &packed_vt }, text.text(), .{
++        .served_name = "m",
++        .model_ids = &.{ "m", "m-skuld" },
++        .identities = &.{"m-skuld"},
++        .enable_thinking = false,
++        .use_drafts = false,
++    }, null);
++    defer srv.deinit();
++    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    const body = "{\"input\":\"the same input\",\"model\":\"m-skuld\",\"questions\":[{\"id\":\"q0\",\"type\":\"choice\",\"question\":\"pick one\",\"options\":[{\"name\":\"red\"},{\"name\":\"blue\"}]},{\"id\":\"q1\",\"type\":\"choice\",\"question\":\"pick two\",\"options\":[{\"name\":\"red\"},{\"name\":\"blue\"}]}]}";
++    var cx: errors.Cx = .{ .a = a };
++    const payload = try decisions.reply(srv, &cx, (try json.parse(a, body)).ok);
++    try std.testing.expectEqual(@as(usize, 1), backend.decides);
++    try std.testing.expectEqual(@as(usize, 0), backend.calls); // no question scored alone
++    try std.testing.expectEqual(@as(?u8, 1), backend.identity);
++    // this fixture renders every prompt as "prompt", so all of it is shared but the last token each question keeps
++    try std.testing.expectEqual(@as(usize, "prompt".len - 1), backend.trunk_len);
++    try std.testing.expectEqualStrings("red", payload.get("answers").?.get("q0").?.get("choice").?.string);
++    try std.testing.expectEqualStrings("blue", payload.get("answers").?.get("q1").?.get("choice").?.string);
++}
+diff --git a/zig/src/server/systemone.zig b/zig/src/server/systemone.zig
+index 06d17afcc..1ddd620f8 100644
+--- a/zig/src/server/systemone.zig
++++ b/zig/src/server/systemone.zig
+@@ -389,8 +389,9 @@ fn scoreAll(srv: *Server, cx: *Cx, trunk: api.Decision, branches: []const []cons
+     }
+     const logits = try cx.a.alloc(f64, labels.items.len);
+     @memset(logits, 0);
+-    if (srv.engine.vtable.decide != null and identity == 0) { // the packed hook reads the stock model only
++    if (srv.engine.vtable.decide != null) {
+         var d = trunk;
++        d.identity = identity;
+         d.arena = cx.a;
+         d.branches = branches;
+         d.counts = counts;
