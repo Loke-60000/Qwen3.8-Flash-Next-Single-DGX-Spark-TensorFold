@@ -1,0 +1,174 @@
+diff --git a/docs/recipes/flash-next-cuda.md b/docs/recipes/flash-next-cuda.md
+index 7014269..df6dc53 100644
+--- a/docs/recipes/flash-next-cuda.md
++++ b/docs/recipes/flash-next-cuda.md
+@@ -110,6 +110,10 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
+ - `TF_FLASHNEXT_DRAFTS` (1 to 15, default 6) and `TF_FLASHNEXT_CONFIDENCE` (default -0.4) set the head's chain. A
+   negative value keeps drafting while the drafts' probabilities multiply to at least its size (0.4 by default), a
+   positive value keeps a later draft only at or above it, and 0 keeps every draft.
++- `TF_FLASHNEXT_DRAFT_VOCAB` picks the ids the head can draft. Unset or empty: the built-in list of 79,591 ids, which
++  covers English and code but leaves out about a sixth of the tokens the model writes in French or German, and most of
++  Japanese. `all`: every id, at about three times the draft head's bytes. A path: a file of ids, as the built-in list
++  is written. The startup line names the count. Drafts are checked, so replies are the same with any list.
+ - `TF_FLASHNEXT_LOAD_THREADS` (1 to 32, default 8) packs the routed NVFP4 experts on that many threads at load, staged
+   through at most 192 MiB of pinned memory: every layer on one GPU, and the MTP head's layer on rank 0 at `--tp 2`.
+   1 keeps the one-expert loop. Other values are refused.
+diff --git a/zig/build/flashnext_proposal_host.zig b/zig/build/flashnext_proposal_host.zig
+index 257e007..277a91c 100644
+--- a/zig/build/flashnext_proposal_host.zig
++++ b/zig/build/flashnext_proposal_host.zig
+@@ -14,6 +14,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, core: *std.Build.Module, la
+     const nonfinite = b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{"Flash Next nonfinite:"} }));
+     b.step("test-flashnext-nonfinite-host", "Actual single, shared and main-model score selection without a GPU").dependOn(&nonfinite.step);
+     b.top_level_steps.get("test-cuda-host").?.step.dependOn(&nonfinite.step);
++    const draft_vocab = b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{ "TF_FLASHNEXT_DRAFT_VOCAB", "the draft vocabulary is", "the head's bytes" } }));
++    b.step("test-flashnext-draft-vocab-host", "The draft head's ids from TF_FLASHNEXT_DRAFT_VOCAB and their device bytes").dependOn(&draft_vocab.step);
++    b.top_level_steps.get("test-cuda-host").?.step.dependOn(&draft_vocab.step);
+     const pack = b.createModule(.{ .root_source_file = b.path("zig/flashnext_proposal_pack_host.zig"), .target = b.graph.host, .link_libc = true });
+     b.step("test-flashnext-proposal-pack-host", "Original Flash Next padded support, pack bytes and fingerprints").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = pack, .filters = &.{"Flash Next proposal:"} })).step);
+ }
+diff --git a/zig/src/families/flashnext/cuda_lanes_bytes.zig b/zig/src/families/flashnext/cuda_lanes_bytes.zig
+index ba1a163..034d8d1 100644
+--- a/zig/src/families/flashnext/cuda_lanes_bytes.zig
++++ b/zig/src/families/flashnext/cuda_lanes_bytes.zig
+@@ -7,7 +7,7 @@ const config = @import("cuda_config.zig");
+ /// Device bytes of the checkpoint: the n-gram tables stay mapped, the MTP head counts; 0 if unread.
+ pub fn deviceWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) u64 {
+     const main = weights.deviceBytes(gpa, io, dir) catch return 0;
+-    return main + mtp.headBytes(headFp8(gpa, io, dir) catch return 0);
++    return main + mtp.headBytes(headFp8(gpa, io, dir) catch return 0, mtp.draftRows(gpa, io));
+ }
+ 
+ pub fn placementWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, world: usize, rank: usize, drafts: bool) !u64 {
+@@ -16,11 +16,11 @@ pub fn placementWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8,
+     if (mode == .modelopt) {
+         const main = try @import("cuda_rank_memory.zig").estimate(gpa, io, dir, world, rank);
+         // Dense draft projections and vocabulary rows exceed the affine head's estimate.
+-        return main + if (drafts and rank == 0) mtp.headBytes(try headFp8(gpa, io, dir)) + (1 << 30) else @as(u64, 0);
++        return main + if (drafts and rank == 0) mtp.headBytes(try headFp8(gpa, io, dir), mtp.draftRows(gpa, io)) + (1 << 30) else @as(u64, 0);
+     }
+     if (world != 1) return error.UnsupportedQuantization;
+     const main = try weights.deviceBytes(gpa, io, dir);
+-    return main + if (drafts) mtp.headBytes(try headFp8(gpa, io, dir)) else @as(u64, 0);
++    return main + if (drafts) mtp.headBytes(try headFp8(gpa, io, dir), mtp.draftRows(gpa, io)) else @as(u64, 0);
+ }
+ 
+ /// Whether the MTP head's routed experts are block FP8: its first expert's gate weight is F8_E4M3 (absent: false).
+diff --git a/zig/src/families/flashnext/cuda_mtp.zig b/zig/src/families/flashnext/cuda_mtp.zig
+index 1799039..19f47a3 100644
+--- a/zig/src/families/flashnext/cuda_mtp.zig
++++ b/zig/src/families/flashnext/cuda_mtp.zig
+@@ -105,6 +105,26 @@ pub fn draftIds(gpa: std.mem.Allocator) ![]u32 {
+     return proposal.legacy.ids(gpa, @import("proposal_table.zig").text, .{ .vocab = vocab, .skip_past_vocab = true, .delimiters = " \t\r\n," });
+ }
+ 
++/// TF_FLASHNEXT_DRAFT_VOCAB picks the ids the draft head can propose. Unset or empty: the built-in list, which covers
++/// English and code but leaves out a fifth of French tokens and most of Japanese. `all`: every id, at about three
++/// times the draft head's bytes a draft. A path: a file of ids in the built-in list's format. Drafts are only
++/// proposals the model checks, so replies are the same whichever list drafts them; only the drafts kept change.
++pub fn draftIdsFrom(gpa: std.mem.Allocator, io: std.Io, setting: ?[]const u8) ![]u32 {
++    const v = setting orelse return draftIds(gpa);
++    if (v.len == 0) return draftIds(gpa);
++    if (std.mem.eql(u8, v, "all")) {
++        const out = try gpa.alloc(u32, vocab);
++        for (out, 0..) |*id, i| id.* = @intCast(i);
++        return out;
++    }
++    const text = std.Io.Dir.cwd().readFileAlloc(io, v, gpa, .limited(1 << 26)) catch |e| {
++        std.log.warn("TF_FLASHNEXT_DRAFT_VOCAB={s}: {s}", .{ v, @errorName(e) });
++        return e;
++    };
++    defer gpa.free(text);
++    return proposal.legacy.ids(gpa, text, .{ .vocab = vocab, .delimiters = " \t\r\n," });
++}
++
+ // ---- sampling ------------------------------------------------------------------------------------------------------
+ 
+ pub fn promote(bits: u16) f32 {
+@@ -246,8 +266,10 @@ pub const Head = struct {
+         }
+         store.dropStaging(); // the head's experts are on the device
+         errdefer h.layer.free(gpa);
+-        const ids = try draftIds(gpa);
++        const setting: ?[]const u8 = if (std.c.getenv("TF_FLASHNEXT_DRAFT_VOCAB")) |v| std.mem.span(v) else null;
++        const ids = try draftIdsFrom(gpa, io, setting);
+         defer gpa.free(ids);
++        std.log.info("flashnext: the draft head proposes {d} of {d} token ids ({s})", .{ ids.len, vocab, if (setting) |v| (if (v.len > 0) v else "built-in") else "built-in" });
+         const head_load = @import("cuda_mtp_load.zig");
+         const role = try head_load.mode();
+         const dtype = (try store.tensor("language_model.lm_head.weight")).dtype;
+@@ -319,14 +341,28 @@ pub const Head = struct {
+     }
+ };
+ 
+-/// Device bytes the head's weights take beyond the main model's; `fp8`: block-FP8 routed experts (headFp8).
+-pub fn headBytes(fp8: bool) usize {
++/// The built-in draft vocabulary's size, as headBytes has always counted it.
++pub const builtin_draft_rows: usize = 79_591;
++
++/// How many ids TF_FLASHNEXT_DRAFT_VOCAB gives the draft head (the built-in count when it cannot be read: the load
++/// that follows refuses that setting by name).
++pub fn draftRows(gpa: std.mem.Allocator, io: std.Io) usize {
++    const setting: ?[]const u8 = if (std.c.getenv("TF_FLASHNEXT_DRAFT_VOCAB")) |v| std.mem.span(v) else null;
++    if (setting == null or setting.?.len == 0) return builtin_draft_rows;
++    const ids = draftIdsFrom(gpa, io, setting) catch return builtin_draft_rows;
++    defer gpa.free(ids);
++    return ids.len;
++}
++
++/// Device bytes the head's weights take beyond the main model's; `fp8`: block-FP8 routed experts (headFp8); `draft_rows`:
++/// the draft vocabulary's ids (draftRows).
++pub fn headBytes(fp8: bool, draft_rows: usize) usize {
+     const weights = 3 * wt.moe_w * dims;
+     const nvfp4 = weights / 2 * 5 / 4;
+     const routed = if (fp8) weights + 3 * (wt.moe_w / 128) * (dims / 128) * 4 else nvfp4;
+     const experts = wt.experts_n * routed + nvfp4;
+     const attn = (wt.proj_n + dims) * dims / 2 * 5 / 4;
+-    const draft = 79_591 * dims / 2 * 5 / 4;
++    const draft = draft_rows * dims / 2 * 5 / 4;
+     return experts + attn + draft + 2 * dims * dims / 2 * 5 / 4;
+ }
+ 
+@@ -340,9 +376,10 @@ pub const check = @import("cuda_mtp_check.zig").check;
+ 
+ test "the head's bytes: NVFP4 experts as before, FP8 routed experts a byte a weight and their f32 block scales" {
+     const before = (wt.experts_n + 1) * 3 * wt.moe_w * dims / 2 * 5 / 4 + (wt.proj_n + dims) * dims / 2 * 5 / 4 + 79_591 * dims / 2 * 5 / 4 + 2 * dims * dims / 2 * 5 / 4;
+-    try std.testing.expectEqual(before, headBytes(false));
++    try std.testing.expectEqual(before, headBytes(false, builtin_draft_rows));
++    try std.testing.expectEqual((248_320 - builtin_draft_rows) * dims / 2 * 5 / 4, headBytes(false, 248_320) - headBytes(false, builtin_draft_rows));
+     // an expert's three projections: 640 x 2560 bytes and 5 x 20 scales each, against 5/8 of a byte a weight
+-    try std.testing.expectEqual(wt.experts_n * (3 * (640 * 2560 + 5 * 20 * 4) - 3 * 640 * 2560 * 5 / 8), headBytes(true) - headBytes(false));
++    try std.testing.expectEqual(wt.experts_n * (3 * (640 * 2560 + 5 * 20 * 4) - 3 * 640 * 2560 * 5 / 8), headBytes(true, builtin_draft_rows) - headBytes(false, builtin_draft_rows));
+ }
+ 
+ test "the draft vocabulary is 79,591 sorted ids under the vocabulary" {
+@@ -352,6 +389,29 @@ test "the draft vocabulary is 79,591 sorted ids under the vocabulary" {
+     for (ids[1..], ids[0 .. ids.len - 1]) |b, a| try std.testing.expect(b > a);
+ }
+ 
++test "TF_FLASHNEXT_DRAFT_VOCAB: unset or empty is the built-in list, all is every id, a path is that file's ids" {
++    const gpa = std.testing.allocator;
++    const io = std.testing.io;
++    for ([_]?[]const u8{ null, "" }) |setting| {
++        const ids = try draftIdsFrom(gpa, io, setting);
++        defer gpa.free(ids);
++        try std.testing.expectEqual(builtin_draft_rows, ids.len);
++    }
++    const all = try draftIdsFrom(gpa, io, "all");
++    defer gpa.free(all);
++    try std.testing.expectEqual(@as(usize, vocab), all.len);
++    try std.testing.expectEqual(@as(u32, vocab - 1), all[all.len - 1]);
++    var tmp = std.testing.tmpDir(.{});
++    defer tmp.cleanup();
++    try tmp.dir.writeFile(io, .{ .sub_path = "ids.txt", .data = "7\n3,5 3\n" });
++    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/ids.txt", .{tmp.sub_path});
++    defer gpa.free(path);
++    const listed = try draftIdsFrom(gpa, io, path);
++    defer gpa.free(listed);
++    try std.testing.expectEqualSlices(u32, &.{ 3, 5, 7 }, listed); // sorted, each id once
++    try std.testing.expectError(error.FileNotFound, draftIdsFrom(gpa, io, ".zig-cache/tmp/no-such-draft-vocab.txt"));
++}
++
+ test "a keyed draw over the top-k columns is the draw over every column" {
+     const gpa = std.testing.allocator;
+     var row: [300]u16 = undefined;

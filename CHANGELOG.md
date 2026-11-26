@@ -5,6 +5,19 @@ Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:
 
 ## Unreleased
 
+**2026-11-26: French and German replies draft from their own tokens (`0014`, `DRAFT_VOCAB`).** TensorFold's built-in
+draft list (79,591 ids) covers all of an English or code sample's tokens but 78.7% of a French one, 70% of German, 34.9% of
+Japanese and 27.5% of Arabic; the model's own French and German output had 16.5% of its tokens outside it. `0014` adds
+`TF_FLASHNEXT_DRAFT_VOCAB` (unset: built-in, `all`, or an id file; the startup line names the count; `headBytes` counts the
+chosen rows) and the recipe's `DRAFT_VOCAB` mounts a list file. A/B on image `uf-0014` (`tools/vocab_bench.py`, decode tok/s
+and draft acceptance): built-in 35.6 / 37.0 / 47.4 / 75.1 (French / German / English / code; acceptance 43 / 42 / 50 / 73%);
+a 2,247-id French and German addition 37.9 / 40.4 / 47.3 / 75.0; MiaAI-Lab's fr and de lists (99,865 ids) 39.1 / 43.8 / 46.7
+/ 74.3 (acceptance 51 / 51 / 50 / 73%); every id 37.6 / 41.0 / 44.4 / 68.7. The lab serves MiaAI-Lab's lists plus the 47
+ids they lacked (`scripts/draft-vocab-fr-de.txt`). `exact.py` passes on each. Host test: `test-flashnext-draft-vocab-host`.
+
+**2026-11-26: memguard brings the server back through `recover.sh`.** A crashed or shed server used to be started with a
+plain `docker start` beside the running services, where the pool found no room; `recover.sh` pauses them for the load.
+
 **2026-11-26: long conversations resume from the prompt cache, its disk tier, or the furthest state the cache holds (`0012`, `0013`).**
 Over 72 hours of the lab's traffic (1,255 requests), 86% of the engine's busy time was prefill (17.9 h against 2.8 h of decode) and only
 36% of prompt tokens came from the cache: `kept nothing at 135322 tokens: 2199 MiB passes the 2110 MiB budget`, so every turn of a 160k

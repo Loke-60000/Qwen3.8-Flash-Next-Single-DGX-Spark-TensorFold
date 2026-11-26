@@ -53,6 +53,13 @@ if [[ "$THINKING" == 1 ]]; then SERVE_ARGS+=(--thinking); else SERVE_ARGS+=(--no
 SERVE_ARGS+=(--kv-cache "$KV_DTYPE")
 [[ -z "$PROMPT_CACHE_GIB" ]] || SERVE_ARGS+=(--prompt-cache-gib "$PROMPT_CACHE_GIB")
 SPILL_ARGS=()
+VOCAB_ARGS=()
+if [[ -n "$DRAFT_VOCAB" && "$DRAFT_VOCAB" != all ]]; then
+  [[ -s "$DRAFT_VOCAB" ]] || die "DRAFT_VOCAB is all or a list file, and $DRAFT_VOCAB is not a file"
+  VOCAB_ARGS=(-v "$(readlink -f "$DRAFT_VOCAB")":/opt/draft-vocab.txt:ro -e TF_FLASHNEXT_DRAFT_VOCAB=/opt/draft-vocab.txt)
+elif [[ "$DRAFT_VOCAB" == all ]]; then
+  VOCAB_ARGS=(-e TF_FLASHNEXT_DRAFT_VOCAB=all)
+fi
 if [[ -n "$SPILL_GIB" ]]; then
   for v in SPILL_GIB SPILL_DAILY_GIB SPILL_MIN_FREE_GIB; do [[ "${!v}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "$v is GiB (e.g. 64), not ${!v}"; done
   [[ "$TENSORFOLD_ROWS_MIN_TOKENS" =~ ^[0-9]+$ ]] || die "TENSORFOLD_ROWS_MIN_TOKENS is a token count, not $TENSORFOLD_ROWS_MIN_TOKENS"
@@ -210,6 +217,7 @@ here_cmd=(docker run -d --name "$CONTAINER_NAME"
           -v "$HF_CACHE":/root/.cache/huggingface:ro
           -v "$KERNEL_CACHE/$KCACHE":/cache
           ${SPILL_ARGS[@]+"${SPILL_ARGS[@]}"}
+          ${VOCAB_ARGS[@]+"${VOCAB_ARGS[@]}"}
           "$IMAGE"
           ${CMD_PREFIX[@]+"${CMD_PREFIX[@]}"}
           tensorfold-native serve "$MODEL_ARG" --name "$SERVED_NAME" --host "$HOST" --port "$PORT"

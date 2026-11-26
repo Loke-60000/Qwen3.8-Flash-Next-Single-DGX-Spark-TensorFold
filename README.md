@@ -50,6 +50,12 @@ The lab's patches `0006` to `0013` sit on top of MiaAI-Lab's series (see `CREDIT
 - **`PROMPT_CACHE_GIB`**: the prompt cache's cap. On v1.2.7 with pages the pool takes the room before the cache, and the pages are
   taken at start while the cache fills as it is used, so set both this and `TENSORFOLD_MEMORY_RESERVE_GIB` for the memory you can give.
 - **`restart.sh`**: a restart with the Spark's small services (embeddings, speech-to-text, tempo) paused during the load.
+- **French and German draft faster** (`0014`, `DRAFT_VOCAB`): TensorFold's built-in draft list covers English and code but
+  only 79% of French tokens and 70% of German ones, and a token the head cannot propose ends its chain. `DRAFT_VOCAB` picks
+  the list (empty: built-in, `all`, or a file); the lab serves `scripts/draft-vocab-fr-de.txt` (99,912 ids, see
+  `CREDITS.md`). `tools/vocab_bench.py`, one stream, greedy, thinking off: French 35.6 to 39.1 tok/s (+10%), German 37.0 to
+  43.8 (+18%), English 47.4 to 46.7 and code 75.1 to 74.3 (-1 to -1.5%, within run-to-run noise). Every id (`all`) gained
+  less in French and German and cost English 6% and code 8.5%. Replies are the same (`exact.py` passes on each list).
 - **Long conversations resume instead of prefilling again** (`0012`, `0013`, and settings). Measured on the lab's traffic over 72 hours
   before this: 86% of the engine's busy time was prefill, and 517 of 1,086 prompts over 64k tokens kept nothing, because a kept state
   costs about 16 KiB a token and the 2.1 GiB cache held nothing past about 130k tokens. Each turn of a 170k-token agent session then

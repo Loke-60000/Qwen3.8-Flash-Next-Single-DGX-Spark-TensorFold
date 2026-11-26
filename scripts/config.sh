@@ -174,6 +174,11 @@ export TENSORFOLD_PROMPT_CACHE_PARTIAL="${TENSORFOLD_PROMPT_CACHE_PARTIAL:-1}"
 # DeltaNet state), rows two states share written once, and TENSORFOLD_ROWS_SYNC=1 writes a block or a 16 MiB piece at a
 # time from the kept state itself instead of staging a whole copy in memory.
 SPILL_GIB="${SPILL_GIB:-}"
+# The ids the MTP draft head can propose (TF_FLASHNEXT_DRAFT_VOCAB, patch 0014). Empty: TensorFold's built-in list, which
+# covers English and code but not a sixth of the tokens the model writes in French or German. `all`: every id. A path:
+# a list file, mounted into the container (scripts/draft-vocab-fr-de.txt is the built-in list plus the model's own French
+# and German tokens). Drafts are checked, so replies are the same with any list; only the drafts kept change.
+DRAFT_VOCAB="${DRAFT_VOCAB:-}"
 SPILL_DIR="${SPILL_DIR:-$HOME/.cache/tensorfold-qwen38/spilled}"
 SPILL_DAILY_GIB="${SPILL_DAILY_GIB:-24}"
 SPILL_MIN_FREE_GIB="${SPILL_MIN_FREE_GIB:-200}"

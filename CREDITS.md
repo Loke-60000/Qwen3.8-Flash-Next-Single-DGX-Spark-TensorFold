@@ -190,6 +190,13 @@ This recipe no longer applies those patches (the serving path is the Zig engine)
 - **[NVIDIA DGX Spark](https://www.nvidia.com/en-us/products/workstations/dgx-spark/)** (GB10 Grace Blackwell,
   128 GB unified memory): every number in the README was measured on one.
 
+## Draft vocabulary
+
+- `scripts/draft-vocab-fr-de.txt` is TensorFold's built-in draft list plus the French and German lists of MiaAI-Lab's
+  `lang-draft-vocabs` branch (patch 0009 on TensorFold 0.3.6.3, 2026-09-29), which took them from the vLLM recipe's
+  language draft vocabularies by [jvr0x](https://github.com/jvr0x) (MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark#84),
+  plus 47 ids the served model wrote in French and German that neither list had.
+
 ## README
 
 - Badges by [Shields.io](https://shields.io/).
