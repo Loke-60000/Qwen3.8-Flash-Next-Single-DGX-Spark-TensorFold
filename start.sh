@@ -52,6 +52,14 @@ if [[ "$THINKING" == 1 ]]; then SERVE_ARGS+=(--thinking); else SERVE_ARGS+=(--no
 [[ "$KV_DTYPE" =~ ^(bf16|fp8)$ ]] || die "KV_DTYPE is bf16 or fp8, not $KV_DTYPE"
 SERVE_ARGS+=(--kv-cache "$KV_DTYPE")
 [[ -z "$PROMPT_CACHE_GIB" ]] || SERVE_ARGS+=(--prompt-cache-gib "$PROMPT_CACHE_GIB")
+SPILL_ARGS=()
+if [[ -n "$SPILL_GIB" ]]; then
+  for v in SPILL_GIB SPILL_DAILY_GIB SPILL_MIN_FREE_GIB; do [[ "${!v}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "$v is GiB (e.g. 64), not ${!v}"; done
+  [[ "$TENSORFOLD_ROWS_MIN_TOKENS" =~ ^[0-9]+$ ]] || die "TENSORFOLD_ROWS_MIN_TOKENS is a token count, not $TENSORFOLD_ROWS_MIN_TOKENS"
+  mkdir -p "$SPILL_DIR" || die "cannot make SPILL_DIR $SPILL_DIR"
+  SERVE_ARGS+=(--spill-gib "$SPILL_GIB" --learn-daily-gib "$SPILL_DAILY_GIB" --learn-min-free-gib "$SPILL_MIN_FREE_GIB")
+  SPILL_ARGS=(-v "$SPILL_DIR":/root/.cache/tensorfold/spilled)
+fi
 [[ "$MAX_VIDEOS" =~ ^[0-9]+$ ]] || die "MAX_VIDEOS is a count, not $MAX_VIDEOS"
 [[ "$TENSORFOLD_VIDEO_TOKENS" =~ ^[0-9]+$ ]] || die "TENSORFOLD_VIDEO_TOKENS is a token count, not $TENSORFOLD_VIDEO_TOKENS"
 if [[ "$VISION" == 1 ]]; then
@@ -201,6 +209,7 @@ here_cmd=(docker run -d --name "$CONTAINER_NAME"
           "${ENV_ARGS[@]}" "${KEY_ARGS[@]}"
           -v "$HF_CACHE":/root/.cache/huggingface:ro
           -v "$KERNEL_CACHE/$KCACHE":/cache
+          ${SPILL_ARGS[@]+"${SPILL_ARGS[@]}"}
           "$IMAGE"
           ${CMD_PREFIX[@]+"${CMD_PREFIX[@]}"}
           tensorfold-native serve "$MODEL_ARG" --name "$SERVED_NAME" --host "$HOST" --port "$PORT"

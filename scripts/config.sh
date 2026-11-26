@@ -164,6 +164,18 @@ MAX_TOKENS="${MAX_TOKENS:-32768}"
 # TF_FLASHNEXT_KV_PAGES the cache and the streams' pages share one room: a smaller cache is more pages, and pages are
 # taken at start while the cache fills as it is used. To give other processes room, raise TENSORFOLD_MEMORY_RESERVE_GIB.
 PROMPT_CACHE_GIB="${PROMPT_CACHE_GIB:-}"
+# Kept prompt states on disk (--spill-gib): a state the prompt cache pushes out of RAM, and those left at a planned stop,
+# are written under SPILL_DIR and read back when their conversation returns, token for token as a fresh prompt pass.
+# Empty: off. The writes are budgeted for the SSD: SPILL_DAILY_GIB a day at most, SPILL_MIN_FREE_GIB of the disk kept
+# free, nothing shorter than TENSORFOLD_ROWS_MIN_TOKENS written (prefilling those is cheaper than their ~110 MiB of
+# DeltaNet state), rows two states share written once, and TENSORFOLD_ROWS_SYNC=1 writes a block or a 16 MiB piece at a
+# time from the kept state itself instead of staging a whole copy in memory.
+SPILL_GIB="${SPILL_GIB:-}"
+SPILL_DIR="${SPILL_DIR:-$HOME/.cache/tensorfold-qwen38/spilled}"
+SPILL_DAILY_GIB="${SPILL_DAILY_GIB:-24}"
+SPILL_MIN_FREE_GIB="${SPILL_MIN_FREE_GIB:-200}"
+export TENSORFOLD_ROWS_SYNC="${TENSORFOLD_ROWS_SYNC:-1}"
+export TENSORFOLD_ROWS_MIN_TOKENS="${TENSORFOLD_ROWS_MIN_TOKENS:-16384}"
 THINKING="${THINKING:-1}"
 DRAFTS="${DRAFTS:-1}"
 # Sampling defaults (a request's own values win). The Zig server honours these flags.

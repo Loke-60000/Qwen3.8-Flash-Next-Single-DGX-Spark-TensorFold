@@ -1,0 +1,82 @@
+diff --git a/zig/src/core/rows_spill_test.zig b/zig/src/core/rows_spill_test.zig
+index bc4630d..a4416f8 100644
+--- a/zig/src/core/rows_spill_test.zig
++++ b/zig/src/core/rows_spill_test.zig
+@@ -271,3 +271,26 @@ test "without --spill-gib nothing changes: an unwritten evicted state is dropped
+     try std.testing.expectEqual(@as(usize, 1), r.states.items.len);
+     try std.testing.expect(r.best(first, &.{}, &.{}, 0) == null);
+ }
++
++test "spill: a state under TENSORFOLD_ROWS_MIN_TOKENS stays in RAM only, and one at it is written when evicted" {
++    const gpa = std.testing.allocator;
++    var arena: std.heap.ArenaAllocator = .init(gpa);
++    defer arena.deinit();
++    const a = arena.allocator();
++    var buf: [128]u8 = undefined;
++    for ([_]u32{ 601, 600 }, [_]usize{ 0, 1 }) |least, written| {
++        const dir = root(&buf, "least");
++        defer rmTree(dir);
++        var f: Fake = .{ .gpa = gpa };
++        var s = pc.Store.init(gpa, f.snapshots(), rules, one(&f, 600));
++        var o = options(dir, .evicted);
++        o.min_tokens = least;
++        const r = try rows.attach(gpa, &s, o);
++        defer r.deinit();
++        defer s.deinit();
++        _ = try request(a, &s, &f, try prompt(a, 0, 1, 700), 600);
++        _ = try request(a, &s, &f, try prompt(a, 0, 2, 700), 600); // the first conversation's state leaves RAM
++        try std.testing.expectEqual(written, r.states.items.len);
++        try std.testing.expectEqual(@as(u64, written), r.counts.writes);
++    }
++}
+diff --git a/zig/src/core/rows_store.zig b/zig/src/core/rows_store.zig
+index c495517..ed703db 100644
+--- a/zig/src/core/rows_store.zig
++++ b/zig/src/core/rows_store.zig
+@@ -68,8 +68,18 @@ pub const Options = struct {
+     staging_bytes: u64 = 1 << 30,
+     longest: u32 = 0, // the longest state the host keeps: the permit takes one whole, within the RAM store's budget
+     slots: ?usize = null, // --checkpoint-slots: the RAM store's states at most, beside this one (null: the family's)
++    min_tokens: u32 = 0, // states shorter than this stay in RAM only (TENSORFOLD_ROWS_MIN_TOKENS when 0)
+ };
+ 
++/// TENSORFOLD_ROWS_MIN_TOKENS: the shortest state worth disk writes; unset or malformed is 0 (every state).
++fn minTokensEnv() u32 {
++    const v = platform.c.getenv("TENSORFOLD_ROWS_MIN_TOKENS") orelse return 0;
++    return std.fmt.parseInt(u32, std.mem.trim(u8, std.mem.span(v), " "), 10) catch {
++        std.log.warn("TENSORFOLD_ROWS_MIN_TOKENS={s} is not a token count: every kept state may be written", .{v});
++        return 0;
++    };
++}
++
+ /// The store under `o`, the RAM store's disk: `o.slots` bounds what it keeps in RAM.
+ pub fn attach(gpa: Allocator, store: *pc.Store, o: Options) !*Rows {
+     const r = try Rows.open(gpa, store.family, o);
+@@ -116,6 +126,7 @@ pub const Rows = struct {
+     flush_clock: ?u64 = null, // a close protects states touched after this clock from older queued saves
+     next_job: u64 = 0,
+     waiting: ?*pc.Entry = null, // the newest save refused room; while it is next, step waits for a reap
++    min_tokens: u32 = 0, // shorter kept states are never queued: their prefill costs less than their disk writes
+     failures: write.Failures = .{},
+     fetch: ?*@import("rows_prefetch.zig").Prefetch = null, // states read ahead for queued requests (a lane host's)
+ 
+@@ -131,6 +142,7 @@ pub const Rows = struct {
+         r.stamp();
+         r.sync_writes = o.sync_writes or (if (platform.c.getenv("TENSORFOLD_ROWS_SYNC")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false);
+         r.staging_bytes = o.staging_bytes;
++        r.min_tokens = if (o.min_tokens > 0) o.min_tokens else minTokensEnv();
+         r.next_job = @truncate(@as(u128, @intCast(write.nowNs())));
+         r.verify = if (platform.c.getenv("TF_IMPRINT_VERIFY")) |v| v[0] == '1' else false;
+         return r;
+diff --git a/zig/src/core/rows_write.zig b/zig/src/core/rows_write.zig
+index 4b21f84..feab193 100644
+--- a/zig/src/core/rows_write.zig
++++ b/zig/src/core/rows_write.zig
+@@ -28,6 +28,7 @@ pub const Failures = struct {
+ 
+ pub fn queued(r: *Rows, e: *pc.Entry, starts: []const u32) void {
+     if (r.stopped or e.image_frame != 0 or e.images.len != 0 or !@import("cache_images.zig").diskSafe(e.tokens)) return;
++    if (e.at < r.min_tokens) return;
+     sync.queued(r, e, starts);
+ }
+ 
