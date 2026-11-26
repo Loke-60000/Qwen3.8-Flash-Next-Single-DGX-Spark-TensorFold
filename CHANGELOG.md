@@ -29,8 +29,8 @@ a 2,247-id French and German addition 37.9 / 40.4 / 47.3 / 75.0; MiaAI-Lab's fr 
 / 74.3 (acceptance 51 / 51 / 50 / 73%); every id 37.6 / 41.0 / 44.4 / 68.7. The lab serves MiaAI-Lab's lists plus the 47
 ids they lacked (`scripts/draft-vocab-fr-de.txt`). `exact.py` passes on each. Host test: `test-flashnext-draft-vocab-host`.
 
-**2026-11-26: memguard brings the server back through `recover.sh`.** A crashed or shed server used to be started with a
-plain `docker start` beside the running services, where the pool found no room; `recover.sh` pauses them for the load.
+**2026-11-26: `restart.sh` and `recover.sh` left the repository.** They paused one host's own services around a restart, so
+they stay local to that host. `./start.sh restart` restarts the server.
 
 **2026-11-26: long conversations resume from the prompt cache, its disk tier, or the furthest state the cache holds (`0012`, `0013`).**
 Over 72 hours of the lab's traffic (1,255 requests), 86% of the engine's busy time was prefill (17.9 h against 2.8 h of decode) and only

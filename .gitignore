@@ -20,3 +20,7 @@ NOTES*.md
 *.rej
 *.log
 __pycache__/
+
+# lab-only service scripts (they pause this host's own services)
+restart.sh
+recover.sh
