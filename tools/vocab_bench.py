@@ -3,7 +3,13 @@
 Acceptance comes from /metrics (tensorfold:mtp_accepted_total over mtp_drafted_total) around each request, so run it
 on an otherwise idle server. usage: python3 tools/vocab_bench.py [LABEL]
 """
-import json, re, sys, time, urllib.request
+import json
+import re
+import sys
+import time
+import urllib.request
+
+from client import model_id
 
 URL = "http://127.0.0.1:8888"
 PROMPTS = {
@@ -26,10 +32,10 @@ def metric(name):
 
 
 def decode(prompt):
-    body = json.dumps({"model": "gl-zero", "max_tokens": 400, "temperature": 0, "stream": True,
+    body = json.dumps({"model": model_id(), "max_tokens": 400, "temperature": 0, "stream": True,
                        "stream_options": {"include_usage": True}, "chat_template_kwargs": {"enable_thinking": False},
                        "messages": [{"role": "user", "content": prompt}]}).encode()
-    t0 = time.time(); first = None; usage = {}
+    first = None; usage = {}
     with urllib.request.urlopen(urllib.request.Request(URL + "/v1/chat/completions", body, {"Content-Type": "application/json"}), timeout=900) as r:
         for raw in r:
             line = raw.decode().strip()

@@ -179,7 +179,7 @@ SPILL_GIB="${SPILL_GIB:-}"
 # a list file, mounted into the container (scripts/draft-vocab-fr-de.txt is the built-in list plus the model's own French
 # and German tokens). Drafts are checked, so replies are the same with any list; only the drafts kept change.
 DRAFT_VOCAB="${DRAFT_VOCAB:-}"
-# Decision model ids (patch 0015): TENSORFOLD_DECISION_IDS=gl-zero-decision=gl-zero,gl-zero-skuld-decision=gl-zero-skuld
+# Decision model ids (patch 0015): TENSORFOLD_DECISION_IDS=Qwen3.8-Flash-Next-decision=Qwen3.8-Flash-Next,Qwen3.8-Flash-Next-abliterated-decision=Qwen3.8-Flash-Next-abliterated
 # gives each listed base (SERVED_NAME, an alias or a TENSORFOLD_IDENTITIES id) a model id of its own that answers
 # POST /v1/decisions and /v1/systemone (choice, score and yes/no probabilities from one prompt pass, no text) and is
 # refused on text routes. Same weights: a decision reads the base's own next-token logits. While other requests decode, a

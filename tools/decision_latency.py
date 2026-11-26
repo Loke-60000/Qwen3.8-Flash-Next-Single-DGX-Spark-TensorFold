@@ -1,10 +1,18 @@
-"""Decision latency on GL-Zero's decision ids: time from request to answer, median of --reps runs, printed as CSV blocks.
+"""Decision latency on the server's decision ids: time from request to answer, median of --reps runs, printed as CSV blocks.
 
-usage: python3 tools/decision_latency.py [--reps 3]
+usage: python3 tools/decision_latency.py [--reps 3]   (MODEL as in client.py; DECISION_MODEL, default MODEL-decision)
 Sweeps: input length x questions (yes/no), options per choice question, question type, endpoint and identity, and
 idle against one request decoding beside it. Inputs are generated shipment logs; the server must be otherwise idle.
 """
-import argparse, json, statistics, threading, time, urllib.request
+import argparse
+import json
+import os
+import statistics
+import threading
+import time
+import urllib.request
+
+from client import get_json, model_id
 
 URL = "http://127.0.0.1:8888"
 
@@ -16,8 +24,12 @@ def post(path, body):
     return time.time() - t, r
 
 
+def decision_id():
+    return os.environ.get("DECISION_MODEL") or f"{model_id()}-decision"
+
+
 def tokens(text):
-    return post("/tokenize", {"model": "gl-zero", "prompt": text})[1]["count"]
+    return post("/tokenize", {"model": model_id(), "prompt": text})[1]["count"]
 
 
 def log(lines):
@@ -44,7 +56,7 @@ def main():
     print("```csv\ninput_tokens,questions,latency_s,per_question_s")
     for n, text in inputs.items():
         for q in (1, 2, 4, 8, 16):
-            s = timed(reps, "/v1/decisions", {"model": "gl-zero-decision", "input": text, "questions": yes_no(q)})
+            s = timed(reps, "/v1/decisions", {"model": decision_id(), "input": text, "questions": yes_no(q)})
             print(f"{sizes[n]},{q},{s:.3f},{s / q:.3f}", flush=True)
     print("```\n")
 
@@ -52,7 +64,7 @@ def main():
     print("```csv\noptions,input_tokens,latency_s")
     for k in (2, 3, 5, 10, 26):
         opts = [{"name": f"option{j}"} for j in range(k)]
-        s = timed(reps, "/v1/decisions", {"model": "gl-zero-decision", "input": text, "questions": [{"id": "c", "type": "choice", "question": "Which option fits the log best?", "options": opts}]})
+        s = timed(reps, "/v1/decisions", {"model": decision_id(), "input": text, "questions": [{"id": "c", "type": "choice", "question": "Which option fits the log best?", "options": opts}]})
         print(f"{k},{sizes[50]},{s:.3f}", flush=True)
     print("```\n")
 
@@ -63,12 +75,12 @@ def main():
         "score_5": {"id": "q", "type": "score", "question": "How complete is the log?", "levels": ["very poor", "poor", "fair", "good", "very good"]},
     }
     for name, q in kinds.items():
-        s = timed(reps, "/v1/decisions", {"model": "gl-zero-decision", "input": text, "questions": [q]})
+        s = timed(reps, "/v1/decisions", {"model": decision_id(), "input": text, "questions": [q]})
         print(f"{name},{sizes[50]},{s:.3f}", flush=True)
     print("```\n")
 
     print("```csv\nendpoint,model,questions,input_tokens,latency_s")
-    for model in ("gl-zero-decision", "gl-zero-skuld-decision"):
+    for model in [m["id"] for m in get_json("/v1/models")["data"] if m["id"].endswith("-decision")][:2]:
         for q in (1, 4):
             s = timed(reps, "/v1/decisions", {"model": model, "input": text, "questions": yes_no(q)})
             print(f"/v1/decisions,{model},{q},{sizes[50]},{s:.3f}", flush=True)
@@ -81,7 +93,7 @@ def main():
     stop = threading.Event()
 
     def decode():
-        body = {"model": "gl-zero", "max_tokens": 2000, "temperature": 0, "chat_template_kwargs": {"enable_thinking": False},
+        body = {"model": model_id(), "max_tokens": 2000, "temperature": 0, "chat_template_kwargs": {"enable_thinking": False},
                 "messages": [{"role": "user", "content": "Write a long Python module with many small utility functions and tests. Output only Python source."}]}
         while not stop.is_set():
             post("/v1/chat/completions", body)
@@ -92,14 +104,14 @@ def main():
     print("```csv\nserver,input_tokens,questions,latency_s")
     for n in (12, 200):
         for q in (1, 4):
-            s = timed(reps, "/v1/decisions", {"model": "gl-zero-decision", "input": inputs[n], "questions": yes_no(q)})
+            s = timed(reps, "/v1/decisions", {"model": decision_id(), "input": inputs[n], "questions": yes_no(q)})
             print(f"one_request_decoding,{sizes[n]},{q},{s:.3f}", flush=True)
     stop.set()
     th.join(timeout=300)
     time.sleep(2)
     for n in (12, 200):
         for q in (1, 4):
-            s = timed(reps, "/v1/decisions", {"model": "gl-zero-decision", "input": inputs[n], "questions": yes_no(q)})
+            s = timed(reps, "/v1/decisions", {"model": decision_id(), "input": inputs[n], "questions": yes_no(q)})
             print(f"idle,{sizes[n]},{q},{s:.3f}", flush=True)
     print("```")
 

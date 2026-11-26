@@ -3,7 +3,13 @@
 Prints time to first token and the server's cached count per turn. Standard library only.
 usage: python3 tools/session_bench.py TOKENS_APPROX TURNS [MODEL]
 """
-import json, random, sys, time, urllib.request
+import json
+import random
+import sys
+import time
+import urllib.request
+
+from client import model_id
 
 URL = "http://127.0.0.1:8888/v1/chat/completions"
 
@@ -41,7 +47,7 @@ def turn(model, messages):
 
 def main():
     tokens, turns = int(sys.argv[1]), int(sys.argv[2])
-    model = sys.argv[3] if len(sys.argv) > 3 else "gl-zero"
+    model = sys.argv[3] if len(sys.argv) > 3 else model_id()
     seed = int(time.time())
     msgs = [{"role": "system", "content": "You answer in one short sentence."},
             {"role": "user", "content": doc(int(tokens * 0.55), seed) + "\n\nWhich word appears on line 3?"}]

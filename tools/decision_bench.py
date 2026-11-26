@@ -1,14 +1,21 @@
 """A normal decode stream's speed alone, then with /v1/decisions requests arriving back to back beside it.
 
-usage: python3 tools/decision_bench.py [MODEL]   (the decision model id, default gl-zero)
+usage: python3 tools/decision_bench.py [DECISION_MODEL]   (default: the served model id plus -decision; MODEL as in client.py)
 """
-import json, sys, threading, time, urllib.request
+import json
+import sys
+import threading
+import time
+import urllib.request
+
+from client import model_id
+
 URL = "http://127.0.0.1:8888"
 TEXT = " ".join(f"Line {i}: the shipment for order {i} left the warehouse on day {i % 28 + 1} and the client confirmed receipt." for i in range(70))
 def post(path, body):
     return json.load(urllib.request.urlopen(urllib.request.Request(URL + path, json.dumps(body).encode(), {"Content-Type": "application/json"}), timeout=900))
 def decode():
-    body = {"model": "gl-zero", "max_tokens": 400, "temperature": 0, "stream": True, "stream_options": {"include_usage": True},
+    body = {"model": model_id(), "max_tokens": 400, "temperature": 0, "stream": True, "stream_options": {"include_usage": True},
             "chat_template_kwargs": {"enable_thinking": False}, "messages": [{"role": "user", "content": "Write a Python LRU cache class with tests. Output only Python source."}]}
     first = None; n = 0
     with urllib.request.urlopen(urllib.request.Request(URL + "/v1/chat/completions", json.dumps(body).encode(), {"Content-Type": "application/json"}), timeout=900) as r:
@@ -22,7 +29,7 @@ def decode():
 def decisions(stop, lat):
     while not stop.is_set():
         t = time.time()
-        post("/v1/decisions", {"model": sys.argv[1] if len(sys.argv) > 1 else "gl-zero", "input": TEXT, "questions": [
+        post("/v1/decisions", {"model": sys.argv[1] if len(sys.argv) > 1 else f"{model_id()}-decision", "input": TEXT, "questions": [
             {"id": "late", "type": "yes_no", "question": "Was any shipment late?"},
             {"id": "tone", "type": "choice", "question": "Tone of the log?", "options": [{"name": "neutral"}, {"name": "urgent"}, {"name": "angry"}]}]})
         lat.append(time.time() - t)

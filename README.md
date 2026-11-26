@@ -50,8 +50,8 @@ The lab's patches `0006` to `0013` sit on top of MiaAI-Lab's series (see `CREDIT
 - **`PROMPT_CACHE_GIB`**: the prompt cache's cap. On v1.2.7 with pages the pool takes the room before the cache, and the pages are
   taken at start while the cache fills as it is used, so set both this and `TENSORFOLD_MEMORY_RESERVE_GIB` for the memory you can give.
 - **`restart.sh`**: a restart with the Spark's small services (embeddings, speech-to-text, tempo) paused during the load.
-- **Decision model ids** (`0015`, `0016`, `TENSORFOLD_DECISION_IDS`): `gl-zero-decision`, `gl-zero-skuld-decision`,
-  `gl-zero-lr7-decision` and `gl-zero-qsa-decision` answer `POST /v1/decisions` (OpenAI's shape: choice, score, yes/no) and
+- **Decision model ids** (`0015`, `0016`, `TENSORFOLD_DECISION_IDS`): `<id>-decision` ids, such as `Qwen3.8-Flash-Next-decision` and
+  `Qwen3.8-Flash-Next-abliterated-decision`, answer `POST /v1/decisions` (OpenAI's shape: choice, score, yes/no) and
   `POST /v1/systemone` (Jev's: choice, score, noul) from one prompt pass and the base model's own next-token logits; no
   text, no other weights, and a text route refuses them. A decision runs in steps beside decoding requests and takes at
   most `TENSORFOLD_DECISION_SHARE` (10%) of the engine's time: a request decoding 75.7 tok/s alone kept 72.4 beside

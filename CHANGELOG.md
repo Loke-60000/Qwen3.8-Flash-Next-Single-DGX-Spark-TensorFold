@@ -203,7 +203,7 @@ promise a YaRN this engine lacks, or describe video input this build refuses.
 with `TF_FLASHNEXT_KV_PAGES` the streams beside the first read their drafts' caches through a null table and the server died in `draftMany`
 (segfault, six concurrent 3k-token prompts). One field, `.pg = d.pg`, as the lone head's pass already had. Image `tensorfold-qwen38:v1.2.2-kv4pg`:
 the kv4 fatbins with tensorfold-native rebuilt. Checks on the Spark with `PARALLEL=15`, `TF_FLASHNEXT_KV_PAGES=256`: `exact.py` at pad 0, 1k
-and 3k (drafted == serial == concurrent, the same hashes as the unpaged build), toolcheck 3/3, `verify_ablate.py gl-zero-skuld gl-zero`,
+and 3k (drafted == serial == concurrent, the same hashes as the unpaged build), toolcheck 3/3, `verify_ablate.py` (an identity against the stock id),
 15 concurrent 2.4k-token prompts each reserving 32,768 reply tokens, and 14 of those beside one 120k-token prompt (all served).
 Speeds against the unpaged 5-stream build, same harness (`bench_streams.py`, 256 tokens, greedy, median of 3): decode at 1 to 5 streams
 within noise (prose 52.8 vs 53.5 at 1, 211.0 vs 213.0 at 5; code 191.0 vs 193.2 at 5), and 8 / 12 / 15 streams now reach 284 / 287 / 376 tok/s

@@ -2,15 +2,20 @@
 
 usage: python3 tools/depth_bench.py DEPTH... (approximate prompt tokens)   prints one JSON line a depth
 """
-import json, sys, time, urllib.request
-from session_bench import doc, URL
+import json
+import sys
+import time
+import urllib.request
+
+from client import model_id
+from session_bench import URL, doc
 
 TASK = ("Write a Python module with a class LRUCache (get, put, capacity, O(1) operations) and pytest tests for it. "
         "Output only Python source.")
 
 
 def run(depth, seed):
-    body = json.dumps({"model": "gl-zero", "max_tokens": 400, "temperature": 0, "stream": True,
+    body = json.dumps({"model": model_id(), "max_tokens": 400, "temperature": 0, "stream": True,
                        "stream_options": {"include_usage": True}, "chat_template_kwargs": {"enable_thinking": False},
                        "messages": [{"role": "user", "content": (doc(int(depth * 0.68), seed) + "\n\n" if depth > 600 else "") + TASK}]}).encode()
     req = urllib.request.Request(URL, body, {"Content-Type": "application/json"})

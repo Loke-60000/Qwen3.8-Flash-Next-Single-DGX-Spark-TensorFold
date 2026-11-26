@@ -2,10 +2,14 @@
 
 usage: python3 tools/disk_check.py [A_TOKENS] [FILLER_TOKENS]
 """
-import json, sys, time
+import json
+import sys
+import time
+
+from client import model_id
 from session_bench import doc, turn
 
-MODEL = "gl-zero"
+MODEL = model_id()
 
 
 def ask(text, seed):
