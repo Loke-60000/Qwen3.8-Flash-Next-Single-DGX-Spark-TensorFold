@@ -73,9 +73,11 @@ The lab's patches `0006` to `0013` sit on top of MiaAI-Lab's series (see `CREDIT
     DeltaNet state). `TENSORFOLD_ROWS_SYNC=1` writes a block or a 16 MiB piece at a time straight from the kept state, with no staged
     copy in memory; the cost is that an eviction writes on the engine thread, about 1 to 3 s for a 1.6 GiB state.
 
-The lab's Spark runs `PARALLEL=15`, `TF_FLASHNEXT_KV_PAGES=256`, `TF_FLASHNEXT_KV4=values`, `TENSORFOLD_MEMORY_RESERVE_GIB=12`,
-`PROMPT_CACHE_GIB=4`, `SPILL_GIB=64`, `PDF=1`, `VIDEO=1`, beside about 10 GiB of other services: 1,543 to 1,941 pages (the count follows
-what is free at the load) beside the engine's own 262,144-token window and a 2.1 GiB prompt cache. Against the lab's v1.2.2 build
+The lab's Spark runs `PARALLEL=15`, `TF_FLASHNEXT_KV_PAGES=256`, `TF_FLASHNEXT_KV4=values`, `TENSORFOLD_MEMORY_RESERVE_GIB=15`,
+`PROMPT_CACHE_GIB=4`, `SPILL_GIB=64`, `PDF=1`, `VIDEO=1`, beside about 8 GiB of other services: about 1,400 pages beside the engine's
+own 262,144-token window and a 1.5 GiB prompt cache. With a 12 GiB reserve the load sized 1,941 pages while the services were paused;
+once they ran, 15 streams and a 126k-token prompt took the GPU driver out of memory (`NV_ERR_NO_MEMORY`) and the kernel's OOM killer
+stopped the other services for 18 minutes on 2026-11-26. Against the lab's v1.2.2 build
 (same pool, `tools/bench_streams.py`, 256 tokens, greedy, median of 3; 5 runs at 12 and 15 streams):
 
 | | v1.2.2 lab build | this build |
