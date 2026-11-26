@@ -1,0 +1,282 @@
+diff --git a/docs/api.md b/docs/api.md
+index 3474a58a0..2645c0920 100644
+--- a/docs/api.md
++++ b/docs/api.md
+@@ -165,6 +165,17 @@ question id, and `usage.completion_tokens` 0. `probabilities` are a softmax over
+ For decisions, `chat_template_kwargs` may be omitted, null, or an object containing only
+ `enable_thinking: false`; other types, keys, or thinking values return HTTP 400.
+ 
++`TENSORFOLD_DECISION_IDS` gives decisions model ids of their own: `id=base` entries, commas or newlines apart, where
++`base` is `--name`, an `--alias` or a `TENSORFOLD_IDENTITIES` id. `GET /v1/models` lists each id; `/v1/decisions` and
++`/v1/systemone` score a request naming one through its base (an identity's rows for an identity's base), and a text
++route refuses it with HTTP 400. A request naming an identity id itself scores through that identity too.
++Flash Next on CUDA takes a score in steps between decode rounds: while other streams decode, a round's steps feed at
++most `TENSORFOLD_DECISION_ROWS` prompt rows between the running scores (256 by default), and steps take at most
++`TENSORFOLD_DECISION_SHARE` of the engine's time (0.1 by default), so the streams keep decoding; with nothing decoding
++a score runs whole. On a GB10, a stream decoding 75.7 tok/s alone decoded 72.4 beside back-to-back decisions on a
++1,806-token input, which took 4.3 s each meanwhile and 0.84 s on an idle server. A decision's own cache sits outside the streams' memory plan, so a prompt
++longer than `TENSORFOLD_DECISION_MAX_TOKENS` (16,384 by default) fails with HTTP 500.
++
+ ## Rerank
+ 
+ `POST /v1/rerank` (also `/rerank`, and by `PUT` as SGLang takes it) scores each document against a query with a
+diff --git a/docs/environment.md b/docs/environment.md
+index c2585e129..9838e8130 100644
+--- a/docs/environment.md
++++ b/docs/environment.md
+@@ -27,6 +27,10 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
+ | `TF_QMMF_HALF_BELOW` | Whole native-size nonnegative block count; zero disables half tiles; default 96 |
+ | `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS` | Exactly `0` or `1`, checked when the CUDA backend starts; default off ([profiles](profiles.md)) |
+ | `TENSORFOLD_PROMPT_CACHE_PARTIAL` | Exactly `0` or `1`, checked when the CUDA backend starts; default off ([profiles](profiles.md)) |
++| `TENSORFOLD_DECISION_IDS` | `id=base` entries: decision-only model ids scored through their base model or identity ([api](api.md#decisions)) |
++| `TENSORFOLD_DECISION_ROWS` | Prompt rows a round decision scores feed while other streams decode; a whole number, default 256 |
++| `TENSORFOLD_DECISION_SHARE` | The share of the engine's time decision steps take while other streams decode; (0, 1], default 0.1 |
++| `TENSORFOLD_DECISION_MAX_TOKENS` | The longest decision prompt, in tokens; a whole number, default 16,384 |
+ | `TF_HEAD_GEOMETRY` | Whole native-size nonnegative geometry count in the head benchmark |
+ | `TF_ROCE_GID_INDEX` | Whole index 0 through 2147483647; unset searches for a RoCE v2 IPv4 GID |
+ | `TF_GEMMA4_CHUNK_SOLO` | Gemma 4 on CUDA: a multiple of 512 from 512 through 4096; unset, empty or 512 is off. Checked when the model loads, with the family's own message |
+diff --git a/zig/src/server/chat.zig b/zig/src/server/chat.zig
+index 58f9db0d2..d6dcf08ff 100644
+--- a/zig/src/server/chat.zig
++++ b/zig/src/server/chat.zig
+@@ -192,6 +192,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
+         .images = rendered.images,
+         .cache_key = rendered.cache_key,
+     };
++    if (@import("server.zig").decisionOf(srv.config, f) != null) return cx.refuse("this model answers decisions only; use POST /v1/decisions or POST /v1/systemone");
+     try request.named(a, @import("server.zig").identityOf(srv.config, f));
+     try srv.checkFeatures(cx, f, input.tools.len > 0, reasoning, rendered.ids, input.tools, &request);
+     server_mod.nameStructure(input.format, &request);
+diff --git a/zig/src/server/decisions.zig b/zig/src/server/decisions.zig
+index f621ac8f1..1ad86f5f5 100644
+--- a/zig/src/server/decisions.zig
++++ b/zig/src/server/decisions.zig
+@@ -72,7 +72,7 @@ pub fn reply(srv: *Server, cx: *Cx, raw: Value) errors.Refused!Value {
+         };
+         try prepared.append(cx.a, item);
+     }
+-    return build(cx, body, prepared.items, try scoreAll(srv, cx, prepared.items));
++    return build(cx, body, prepared.items, try scoreAll(srv, cx, prepared.items, @import("server.zig").decisionIdentity(srv.config, body)));
+ }
+ 
+ fn validate(cx: *Cx, body: Value) errors.Refused!void {
+@@ -356,12 +356,12 @@ fn labelRefuse(cx: *Cx, label: []const u8) errors.Refused {
+     return cx.fail(.request, "the answer label {s} is not one distinct token after the chat prompt for this tokenizer, so this model is not supported", .{pyrepr.repr(cx.a, .{ .string = label }) catch label});
+ }
+ 
+-fn scoreAll(srv: *Server, cx: *Cx, prepared: []const Prepared) errors.Refused![]Scored {
++fn scoreAll(srv: *Server, cx: *Cx, prepared: []const Prepared, identity: u8) errors.Refused![]Scored {
+     const scored = try cx.a.alloc(Scored, prepared.len);
+     for (prepared, scored) |item, *row| {
+         const logits = try cx.a.alloc(f64, item.label_ids.len);
+         @memset(logits, 0);
+-        const logsumexp = srv.engine.score(item.prompt_ids, item.label_ids, logits, true) catch |e| switch (e) {
++        const logsumexp = srv.engine.scoreAs(identity, item.prompt_ids, item.label_ids, logits, true) catch |e| switch (e) {
+             error.Unsupported => return cx.refuse("decision scoring is not supported by this engine yet"),
+             error.Failed => return cx.fail(.server, "decision scoring failed", .{}),
+         };
+diff --git a/zig/src/server/decisions_test.zig b/zig/src/server/decisions_test.zig
+index 500a8b706..7bd56aa1e 100644
+--- a/zig/src/server/decisions_test.zig
++++ b/zig/src/server/decisions_test.zig
+@@ -65,6 +65,7 @@ const Backend = struct {
+     calls: usize = 0,
+     prompt_len: usize = 0,
+     label_len: usize = 0,
++    identity: ?u8 = null, // the identity the last scoreAs read
+ 
+     fn engine(b: *Backend) api.Engine {
+         return .{ .ctx = b, .vtable = if (b.hooked) &hooked_vt else &bare_vt };
+@@ -98,6 +99,12 @@ const Backend = struct {
+     }
+ };
+ 
++fn scoreAs(ctx: *anyopaque, identity: u8, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{Failed}!f64 {
++    const b: *Backend = @ptrCast(@alignCast(ctx));
++    b.identity = identity;
++    return Backend.score(ctx, prompt, labels, logits, mass);
++}
++
+ const bare_vt: api.Engine.VTable = .{ .info = Backend.info, .submit = Backend.submit, .cancel = Backend.cancel, .status = Backend.status, .memory = Backend.memory };
+ const hooked_vt: api.Engine.VTable = .{ .info = Backend.info, .submit = Backend.submit, .cancel = Backend.cancel, .status = Backend.status, .memory = Backend.memory, .score = Backend.score };
+ 
+@@ -265,3 +272,35 @@ test "capability audit: decision context errors retain their OpenAI code through
+     try std.testing.expectEqualStrings("question 'q': the prompt has 6 tokens, which does not fit the context length of 4 tokens", err.get("message").?.string);
+     try std.testing.expectEqual(@as(usize, 0), backend.calls);
+ }
++
++const as_vt: api.Engine.VTable = .{ .info = Backend.info, .submit = Backend.submit, .cancel = Backend.cancel, .status = Backend.status, .memory = Backend.memory, .score = Backend.score, .score_as = scoreAs };
++
++test "TENSORFOLD_DECISION_IDS: a decision id scores through its base's identity, and only decision routes take it" {
++    var text: ByteText = .{};
++    var backend: Backend = .{ .hooked = true };
++    const config: @import("server.zig").Config = .{
++        .served_name = "m",
++        .model_ids = &.{ "m", "m-skuld", "m-decision", "m-skuld-decision" },
++        .identities = &.{"m-skuld"},
++        .decision_ids = &.{ "m-decision", "m-skuld-decision" },
++        .decision_identities = &.{ 0, 1 },
++        .enable_thinking = false,
++        .use_drafts = false,
++    };
++    const srv = try Server.init(std.testing.allocator, std.testing.io, .{ .ctx = &backend, .vtable = &as_vt }, text.text(), config, null);
++    defer srv.deinit();
++    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
++    defer arena.deinit();
++    const a = arena.allocator();
++    for ([_][]const u8{ "m-skuld-decision", "m-decision", "m-skuld", "m" }, [_]u8{ 1, 0, 1, 0 }) |model, want| {
++        const body = try std.fmt.allocPrint(a, "{{\"input\":\"x\",\"model\":\"{s}\",\"questions\":[{{\"id\":\"q\",\"type\":\"choice\",\"question\":\"pick\",\"options\":[{{\"name\":\"red\"}},{{\"name\":\"blue\"}}]}}]}}", .{model});
++        var cx: errors.Cx = .{ .a = a };
++        backend.identity = null;
++        const payload = try decisions.reply(srv, &cx, (try json.parse(a, body)).ok);
++        try std.testing.expectEqualStrings(model, payload.get("model").?.string);
++        try std.testing.expectEqual(@as(?u8, want), backend.identity);
++    }
++    const server_mod = @import("server.zig");
++    try std.testing.expectEqual(@as(?u8, 1), server_mod.decisionOf(config, (try json.parse(a, "{\"model\":\"m-skuld-decision\"}")).ok));
++    try std.testing.expectEqual(@as(?u8, null), server_mod.decisionOf(config, (try json.parse(a, "{\"model\":\"m-skuld\"}")).ok));
++}
+diff --git a/zig/src/server/serve.zig b/zig/src/server/serve.zig
+index 0d10756d9..8850ce09a 100644
+--- a/zig/src/server/serve.zig
++++ b/zig/src/server/serve.zig
+@@ -168,7 +168,44 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
+         };
+         identity_ids[i] = ident.id;
+     }
++    const plain_ids = ids.items.len; // the served name and the aliases: the stock model
+     ids.appendSlice(a, identity_ids[0..listed.len]) catch return 1;
++    // TENSORFOLD_DECISION_IDS: `id=base` entries, base the served name, an alias or an identity; each id a model of its
++    // own that answers /v1/decisions and /v1/systemone through its base's identity, and no text route
++    var decision_ids: std.ArrayList([]const u8) = .empty;
++    var decision_identities: std.ArrayList(u8) = .empty;
++    if (env(s, "TENSORFOLD_DECISION_IDS")) |spec| {
++        var it = std.mem.tokenizeAny(u8, spec, ",\n");
++        while (it.next()) |raw| {
++            const entry = std.mem.trim(u8, raw, " \t\r");
++            if (entry.len == 0) continue;
++            const eq = std.mem.indexOfScalar(u8, entry, '=') orelse {
++                std.debug.print("tensorfold: TENSORFOLD_DECISION_IDS: '{s}' is not id=base (base: --name, an --alias or an identity)\n", .{entry});
++                return 1;
++            };
++            const id = std.mem.trim(u8, entry[0..eq], " \t");
++            const base = std.mem.trim(u8, entry[eq + 1 ..], " \t");
++            if (id.len == 0 or base.len == 0) {
++                std.debug.print("tensorfold: TENSORFOLD_DECISION_IDS: '{s}' is not id=base (base: --name, an --alias or an identity)\n", .{entry});
++                return 1;
++            }
++            for (ids.items) |seen| if (std.mem.eql(u8, seen, id)) {
++                std.debug.print("tensorfold: TENSORFOLD_DECISION_IDS: {s} is already a model id; give it an id of its own\n", .{id});
++                return 1;
++            };
++            const identity: u8 = for (identity_ids[0..listed.len], 1..) |known, i| {
++                if (std.mem.eql(u8, known, base)) break @intCast(i);
++            } else for (ids.items[0..plain_ids]) |known| {
++                if (std.mem.eql(u8, known, base)) break 0;
++            } else {
++                std.debug.print("tensorfold: TENSORFOLD_DECISION_IDS: {s}'s base {s} is not --name, an --alias or an identity\n", .{ id, base });
++                return 1;
++            };
++            ids.append(a, id) catch return 1;
++            decision_ids.append(a, id) catch return 1;
++            decision_identities.append(a, identity) catch return 1;
++        }
++    }
+     var bad_id: []const u8 = "";
+     const backgrounds = namedBackgrounds(a, args.name_priority, ids.items, &bad_id) catch |err| switch (err) {
+         error.OutOfMemory => return 1,
+@@ -227,6 +264,8 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
+         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
+         .phase_metrics = if (env(s, "TENSORFOLD_PHASE_METRICS")) |v| std.mem.eql(u8, v, "1") else false,
+         .identities = identity_ids[0..listed.len],
++        .decision_ids = decision_ids.items,
++        .decision_identities = decision_identities.items,
+         .spark_stats = spark_stats,
+         .dashboard = args.dashboard,
+         .compact_at = if (args.compact_auto) .{ .auto = {} } else if (args.compact_fraction) |f| .{ .fraction = f } else null,
+diff --git a/zig/src/server/server.zig b/zig/src/server/server.zig
+index f4ceb61b1..1efe5403d 100644
+--- a/zig/src/server/server.zig
++++ b/zig/src/server/server.zig
+@@ -85,6 +85,10 @@ pub const Config = struct {
+     phase_metrics: bool = false,
+     /// TENSORFOLD_IDENTITIES' model ids in order (each in model_ids): a request naming the i-th gets identity i + 1.
+     identities: []const []const u8 = &.{},
++    /// TENSORFOLD_DECISION_IDS' model ids (each in model_ids): /v1/decisions and /v1/systemone only, through the identity
++    /// at the same index of `decision_identities` (0 the stock model); a text route refuses them.
++    decision_ids: []const []const u8 = &.{},
++    decision_identities: []const u8 = &.{},
+     /// The Spark server's keys in each reply's ``tensorfold`` block (spark_wire.zig): DeepSeek-V4, or TENSORFOLD_WIRE.
+     spark_stats: bool = false,
+     /// Null keeps every reply identical to a server that has no compaction.
+@@ -132,6 +136,19 @@ pub fn nameStructure(format: ?[]const u8, request: *api.Request) void {
+     if (request.structure) |*st| st.field = name;
+ }
+ 
++/// The identity a decision model id reads (TENSORFOLD_DECISION_IDS); null: the request names no decision id.
++pub fn decisionOf(config: Config, f: Value) ?u8 {
++    const m = f.get("model") orelse return null;
++    if (m != .string) return null;
++    for (config.decision_ids, config.decision_identities) |id, identity| if (std.mem.eql(u8, m.string, id)) return identity;
++    return null;
++}
++
++/// The identity a decision route reads: a decision id's, else the identity the model id names (identityOf).
++pub fn decisionIdentity(config: Config, f: Value) u8 {
++    return decisionOf(config, f) orelse identityOf(config, f);
++}
++
+ /// The identity the request's model id names, 1..n of Config.identities; 0: the stock model.
+ pub fn identityOf(config: Config, f: Value) u8 {
+     const m = f.get("model") orelse return 0;
+diff --git a/zig/src/server/systemone.zig b/zig/src/server/systemone.zig
+index d2355a15d..06d17afcc 100644
+--- a/zig/src/server/systemone.zig
++++ b/zig/src/server/systemone.zig
+@@ -92,14 +92,17 @@ pub fn reply(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
+         if (seen.urls.len == 0 and window > 0 and trunk.len + b.len > window) return cx.fail(.context_length, "a decision sequence exceeds the {d}-token context", .{window});
+         read += b.len;
+     }
+-    const scores = try scoreAll(srv, cx, .{ .trunk = trunk, .at = head.len, .pictures = seen.urls }, branches, groups, &read);
++    const identity = @import("server.zig").decisionIdentity(srv.config, body);
++    const scores = try scoreAll(srv, cx, .{ .trunk = trunk, .at = head.len, .pictures = seen.urls }, branches, groups, &read, identity);
+     const answers = try json.newObject(cx.a);
+     for (questions, scores) |q, s| try answers.put(cx.a, q.id, try answer(cx.a, q, s));
+     const usage = try json.newObject(cx.a);
+     try usage.put(cx.a, "input_tokens", try json.intValue(cx.a, read));
+     try usage.put(cx.a, "output_tokens", .{ .int = "0" });
+     const out = try json.newObject(cx.a);
+-    try out.put(cx.a, "model", .{ .string = srv.config.served_name });
++    // the served name, as llama-server answers; a decision id is a model of its own and answers as itself
++    const asked = if (@import("server.zig").decisionOf(srv.config, body) != null) body.get("model").? else Value{ .string = srv.config.served_name };
++    try out.put(cx.a, "model", asked);
+     try out.put(cx.a, "answers", .{ .object = answers });
+     try out.put(cx.a, "usage", .{ .object = usage });
+     return .{ .object = out };
+@@ -374,7 +377,7 @@ fn questionText(a: Allocator, w: *std.Io.Writer, q: Question, codes: []const Cod
+ }
+ 
+ /// Each question's option scores (its best form's logit): one packed pass when the engine decides, else a pass each.
+-fn scoreAll(srv: *Server, cx: *Cx, trunk: api.Decision, branches: []const []const u32, groups: []const []const []const u32, read: *usize) errors.Refused![]const []const f64 {
++fn scoreAll(srv: *Server, cx: *Cx, trunk: api.Decision, branches: []const []const u32, groups: []const []const []const u32, read: *usize, identity: u8) errors.Refused![]const []const f64 {
+     var labels: std.ArrayList(u32) = .empty;
+     const counts = try cx.a.alloc(usize, groups.len);
+     for (groups, counts) |g, *n| {
+@@ -386,7 +389,7 @@ fn scoreAll(srv: *Server, cx: *Cx, trunk: api.Decision, branches: []const []cons
+     }
+     const logits = try cx.a.alloc(f64, labels.items.len);
+     @memset(logits, 0);
+-    if (srv.engine.vtable.decide != null) {
++    if (srv.engine.vtable.decide != null and identity == 0) { // the packed hook reads the stock model only
+         var d = trunk;
+         d.arena = cx.a;
+         d.branches = branches;
+@@ -403,7 +406,7 @@ fn scoreAll(srv: *Server, cx: *Cx, trunk: api.Decision, branches: []const []cons
+         for (branches, counts) |b, n| {
+             const prompt = try std.mem.concat(cx.a, u32, &.{ trunk.trunk, b });
+             // a softmax over the options alone: the vocabulary's mass is not read
+-            _ = srv.engine.score(prompt, labels.items[at..][0..n], logits[at..][0..n], false) catch |e| switch (e) {
++            _ = srv.engine.scoreAs(identity, prompt, labels.items[at..][0..n], logits[at..][0..n], false) catch |e| switch (e) {
+                 error.Unsupported => return cx.refuse("decision scoring is not supported by this engine"),
+                 error.Failed => return cx.fail(.server, "decision scoring failed", .{}),
+             };

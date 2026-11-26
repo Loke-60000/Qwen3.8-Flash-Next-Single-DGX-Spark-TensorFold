@@ -1,0 +1,575 @@
+diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
+index ea1d91504..3d243d5e7 100644
+--- a/zig/src/core/engine_api.zig
++++ b/zig/src/core/engine_api.zig
+@@ -451,6 +451,8 @@ pub const Engine = struct {
+         keepalive: ?*const fn (ctx: *anyopaque) ?keepalive.Target = null,
+         /// One logit per label at the row after `prompt`, and the vocabulary logsumexp when `mass` (else 0).
+         score: ?*const fn (ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{Failed}!f64 = null,
++        /// `score` read through identity `identity` (TENSORFOLD_IDENTITIES' 1..n, 0 the stock model); null: stock only.
++        score_as: ?*const fn (ctx: *anyopaque, identity: u8, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{Failed}!f64 = null,
+         /// Each branch's label logits at its last row after the decision's shared trunk.
+         decide: ?*const fn (ctx: *anyopaque, d: *Decision) error{ Failed, Refused }!void = null,
+         /// Queue `request` for the family's learner; it stays valid until `done`. Null: this engine does not learn.
+@@ -533,6 +535,13 @@ pub const Engine = struct {
+         return f(e.ctx, prompt, labels, logits, mass);
+     }
+ 
++    /// The decision hook through an identity: the stock hook for identity 0, Unsupported where the engine reads no other.
++    pub fn scoreAs(e: Engine, identity: u8, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{ Failed, Unsupported }!f64 {
++        if (e.vtable.score_as) |f| return f(e.ctx, identity, prompt, labels, logits, mass);
++        if (identity != 0) return error.Unsupported;
++        return e.score(prompt, labels, logits, mass);
++    }
++
+     pub fn decide(e: Engine, d: *Decision) error{ Failed, Refused, Unsupported }!void {
+         const f = e.vtable.decide orelse return error.Unsupported;
+         return f(e.ctx, d);
+diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
+index d883f1d8a..c20351c7f 100644
+--- a/zig/src/core/lane_host.zig
++++ b/zig/src/core/lane_host.zig
+@@ -177,6 +177,7 @@ pub const LaneHost = struct {
+     const scored_vtable: Engine.VTable = blk: {
+         var v = plain_vtable;
+         v.score = scoring.score;
++        v.score_as = scoring.scoreAs;
+         break :blk v;
+     };
+ 
+diff --git a/zig/src/core/lane_host_score.zig b/zig/src/core/lane_host_score.zig
+index 3e3555149..9bd0b9ea6 100644
+--- a/zig/src/core/lane_host_score.zig
++++ b/zig/src/core/lane_host_score.zig
+@@ -2,6 +2,14 @@
+ const std = @import("std");
+ const api = @import("engine_api.zig");
+ const LaneHost = @import("lane_host.zig").LaneHost;
++const ScoreJob = @import("lanes").backend.ScoreJob;
++
++/// Prompt rows a round's score steps feed while other streams decode (TENSORFOLD_DECISION_ROWS); idle, a score runs whole.
++pub const rows_beside_default: usize = 256;
++/// The longest prompt a score takes (TENSORFOLD_DECISION_MAX_TOKENS): its cache sits outside the streams' memory plan.
++pub const max_tokens_default: usize = 16384;
++/// The share of the engine's time score steps may take while other streams decode (TENSORFOLD_DECISION_SHARE).
++pub const share_default: f64 = 0.1;
+ 
+ /// One scoring question, on the asking thread's stack until `done`: a prompt's labels, or a decision's branches.
+ pub const Ask = struct {
+@@ -11,6 +19,8 @@ pub const Ask = struct {
+     labels: []const u32,
+     logits: []f64,
+     mass: bool = false,
++    identity: u8 = 0, // the identity its request named (scoreAs), 0 the stock model
++    job: ?ScoreJob = null, // a score the backend takes in steps (score_step), from its first step to its last
+     branches: []const []const u32 = &.{},
+     counts: []const usize = &.{},
+     logsumexp: f64 = 0,
+@@ -24,12 +34,27 @@ pub const Ask = struct {
+ /// Questions waiting for the engine thread (under the host's lock).
+ pub const Queue = struct {
+     asks: std.ArrayList(*Ask) = .empty,
++    /// Scores past their first step and before their last (engine thread only), oldest first.
++    running: std.ArrayList(*Ask) = .empty,
++    /// While streams decode, no score steps before this awake-clock time: what the last steps owe them (engine thread).
++    next_ns: i96 = 0,
+ };
+ 
++/// How long decoding runs alone after score steps that took `step_ns`, so steps take `share` of the time at most.
++pub fn owed(step_ns: i96, share: f64) i96 {
++    if (share >= 1 or step_ns <= 0) return 0;
++    return @intFromFloat(@as(f64, @floatFromInt(step_ns)) * (1 - share) / share);
++}
++
+ /// Engine.score: queued for the engine thread, which runs it between two rounds; Failed when the host is closing.
+ pub fn score(ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{Failed}!f64 {
++    return scoreAs(ctx, 0, prompt, labels, logits, mass);
++}
++
++/// Engine.scoreAs: `score` with identity `identity`'s rows; only a backend that scores in steps takes one past 0.
++pub fn scoreAs(ctx: *anyopaque, identity: u8, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{Failed}!f64 {
+     const h: *LaneHost = @ptrCast(@alignCast(ctx));
+-    var ask: Ask = .{ .prompt = prompt, .labels = labels, .logits = logits, .mass = mass };
++    var ask: Ask = .{ .prompt = prompt, .labels = labels, .logits = logits, .mass = mass, .identity = identity };
+     try put(h, &ask);
+     return ask.logsumexp;
+ }
+@@ -63,10 +88,26 @@ fn put(h: *LaneHost, ask: *Ask) error{Failed}!void {
+     if (ask.failed) return error.Failed;
+ }
+ 
+-/// Every queued question answered by the backend (engine thread, between rounds).
++/// Queued questions answered by the backend (engine thread, between rounds). A backend that scores in steps feeds the
++/// running scores, oldest first, at most TENSORFOLD_DECISION_ROWS rows a round while other streams decode, so they
++/// keep decoding; with none decoding every score runs to its end now. A score not finished waits for the next round.
+ pub fn answer(h: *LaneHost) void {
+     h.lock();
+-    if (h.scores.asks.items.len == 0) {
++    const none = h.scores.asks.items.len == 0 and h.scores.running.items.len == 0;
++    h.unlock();
++    if (none) return;
++    if (h.core.activeCount() == 0) return answerWith(h, null); // nothing decoding: every score to its end
++    const t0 = std.Io.Clock.awake.now(h.io).toNanoseconds();
++    if (t0 < h.scores.next_ns) return answerWith(h, 0); // the decoders' time: new scores queue, none steps
++    answerWith(h, envSize("TENSORFOLD_DECISION_ROWS", rows_beside_default));
++    const t1 = std.Io.Clock.awake.now(h.io).toNanoseconds();
++    h.scores.next_ns = t1 + owed(t1 - t0, envShare());
++}
++
++/// `answer` with this round's row budget for scores taken in steps (null: none, every score to its end).
++pub fn answerWith(h: *LaneHost, rows: ?usize) void {
++    h.lock();
++    if (h.scores.asks.items.len == 0 and h.scores.running.items.len == 0) {
+         h.unlock();
+         return;
+     }
+@@ -77,7 +118,48 @@ pub fn answer(h: *LaneHost) void {
+     h.unlock();
+     defer h.gpa.free(list);
+     const backend = h.core.backend;
++    var finished: std.ArrayList(*Ask) = .empty;
++    defer finished.deinit(h.gpa);
++    if (backend.vtable.score_step) |step| {
++        var budget = rows;
++        for (list) |a| if (a.kind == .score) {
++            if (a.prompt.len > envSize("TENSORFOLD_DECISION_MAX_TOKENS", max_tokens_default)) {
++                std.log.warn("lane host: a decision of {d} prompt tokens passes TENSORFOLD_DECISION_MAX_TOKENS", .{a.prompt.len});
++                a.failed = true;
++                finished.append(h.gpa, a) catch {};
++                continue;
++            }
++            a.job = .{ .prompt = a.prompt, .labels = a.labels, .logits = a.logits, .mass = a.mass, .identity = a.identity };
++            h.scores.running.append(h.gpa, a) catch {
++                a.failed = true;
++                finished.append(h.gpa, a) catch {};
++            };
++        };
++        var i: usize = 0;
++        while (i < h.scores.running.items.len) {
++            if (budget != null and budget.? == 0) break;
++            const a = h.scores.running.items[i];
++            const job = &a.job.?;
++            const before = job.fed;
++            job.rows = budget orelse 0;
++            const done = step(backend.ptr, job) catch |err| blk: {
++                std.log.warn("lane host: a decision score failed ({s})", .{@errorName(err)});
++                a.failed = true;
++                break :blk true;
++            };
++            if (budget) |*b| b.* -|= job.fed - before;
++            if (!done) {
++                i += 1;
++                continue;
++            }
++            a.logsumexp = job.logsumexp;
++            _ = h.scores.running.orderedRemove(i);
++            finished.append(h.gpa, a) catch {};
++        }
++    }
+     for (list) |a| {
++        if (a.kind == .score and backend.vtable.score_step != null) continue; // taken above
++        defer finished.append(h.gpa, a) catch {};
+         // a drain's deadline stops the queue: the started score finishes, the rest fail without running
+         h.lock();
+         const closing = h.closing;
+@@ -92,6 +174,10 @@ pub fn answer(h: *LaneHost) void {
+                     a.failed = true;
+                     continue;
+                 };
++                if (a.identity != 0) { // the one-call hook reads the stock model only
++                    a.failed = true;
++                    continue;
++                }
+                 if (run(backend.ptr, a.prompt, a.labels, a.logits, a.mass)) |lse| a.logsumexp = lse else |err| {
+                     std.log.warn("lane host: a decision score failed ({s})", .{@errorName(err)});
+                     a.failed = true;
+@@ -114,20 +200,43 @@ pub fn answer(h: *LaneHost) void {
+         }
+     }
+     h.lock();
+-    for (list) |a| a.done = true;
++    for (finished.items) |a| a.done = true;
+     h.wake.broadcast(h.io);
+     h.unlock();
+ }
+ 
++/// TENSORFOLD_DECISION_SHARE, a fraction in (0, 1]; else the default (unset, empty or malformed).
++fn envShare() f64 {
++    const v = std.c.getenv("TENSORFOLD_DECISION_SHARE") orelse return share_default;
++    const x = std.fmt.parseFloat(f64, std.mem.trim(u8, std.mem.span(v), " ")) catch return share_default;
++    return if (x > 0 and x <= 1) x else share_default;
++}
++
++/// A positive whole-number setting, else `default` (unset, empty or malformed).
++fn envSize(name: [:0]const u8, default: usize) usize {
++    const v = std.c.getenv(name) orelse return default;
++    const n = std.fmt.parseInt(usize, std.mem.trim(u8, std.mem.span(v), " "), 10) catch return default;
++    return if (n == 0) default else n;
++}
++
+ /// Questions left when the engine stops: each fails.
+ pub fn close(h: *LaneHost) void {
++    const backend = h.core.backend;
++    for (h.scores.running.items) |a| if (a.job) |*job| { // the engine thread's own list: their caches go first
++        if (job.state != null) if (backend.vtable.score_drop) |drop| drop(backend.ptr, job);
++    };
+     h.lock();
+     h.closing = true;
+     for (h.scores.asks.items) |a| {
+         a.failed = true;
+         a.done = true;
+     }
++    for (h.scores.running.items) |a| {
++        a.failed = true;
++        a.done = true;
++    }
+     h.scores.asks.clearAndFree(h.gpa);
++    h.scores.running.clearAndFree(h.gpa);
+     h.wake.broadcast(h.io);
+     h.unlock();
+ }
+diff --git a/zig/src/core/lane_host_score_test.zig b/zig/src/core/lane_host_score_test.zig
+index 693af5e0c..62fbb6ba6 100644
+--- a/zig/src/core/lane_host_score_test.zig
++++ b/zig/src/core/lane_host_score_test.zig
+@@ -221,3 +221,148 @@ test "a decision queued behind a closing host fails without running" {
+     try std.testing.expectEqual(@as(usize, 0), Decider.calls);
+     try std.testing.expect(asks[1].failed and asks[1].done);
+ }
++
++/// A backend scoring in steps: each step feeds `job.rows` rows (0: the rest); done, label i scores the prompt's length
++/// plus i plus 100 times the identity, the mass 7.5.
++const Stepper = struct {
++    var drops: usize = 0;
++    var steps: usize = 0;
++
++    fn step(_: *anyopaque, job: *lanes.backend.ScoreJob) anyerror!bool {
++        steps += 1;
++        const left = job.prompt.len - job.fed;
++        job.fed += if (job.rows == 0) left else @min(left, job.rows);
++        job.state = @ptrFromInt(0x10); // a cache held between steps
++        if (job.fed < job.prompt.len) return false;
++        job.state = null;
++        for (job.logits, 0..) |*v, i| v.* = @floatFromInt(job.prompt.len + i + 100 * @as(usize, job.identity));
++        job.logsumexp = if (job.mass) 7.5 else 0;
++        return true;
++    }
++
++    fn drop(_: *anyopaque, job: *lanes.backend.ScoreJob) void {
++        drops += 1;
++        job.state = null;
++    }
++};
++
++fn stepperHost(gpa: std.mem.Allocator, cfg: *lanes.Config, target: *lanes.fake.Fake, vt: *lanes.backend.Backend.VTable, clock: *lanes.fake.FixedClock, core: *lanes.Engine) LaneHost {
++    const plain = target.backend();
++    vt.* = plain.vtable.*;
++    vt.score_step = Stepper.step;
++    vt.score_drop = Stepper.drop;
++    core.* = lanes.Engine.init(gpa, cfg, .{ .ptr = plain.ptr, .vtable = vt }, clock.clock());
++    return LaneHost.init(gpa, std.testing.io, core, .{ .lanes = 1 });
++}
++
++test "a score taken in steps feeds at most a round's rows, waits for the next round, and reads its identity" {
++    const gpa = std.testing.allocator;
++    var cfg = try lanes.Config.init(gpa, .{}, 1, 0);
++    defer cfg.deinit(gpa);
++    var target: lanes.fake.Fake = .{ .gpa = gpa };
++    defer target.deinit();
++    var vt: lanes.backend.Backend.VTable = undefined;
++    var clock: lanes.fake.FixedClock = .{};
++    var core: lanes.Engine = undefined;
++    var host = stepperHost(gpa, &cfg, &target, &vt, &clock, &core);
++    defer core.deinit();
++    defer scoring.close(&host);
++    var logits: [2]f64 = undefined;
++    var ask: scoring.Ask = .{ .prompt = &.{ 1, 2, 3, 4, 5, 6, 7 }, .labels = &.{ 8, 9 }, .logits = &logits, .mass = true, .identity = 2 };
++    try host.scores.asks.append(gpa, &ask);
++    scoring.answerWith(&host, 3); // a round beside decoding streams: 3 rows
++    try std.testing.expect(!ask.done and ask.job.?.fed == 3);
++    scoring.answerWith(&host, 3);
++    try std.testing.expect(!ask.done and ask.job.?.fed == 6);
++    scoring.answerWith(&host, 3);
++    try std.testing.expect(ask.done and !ask.failed);
++    try std.testing.expectEqualSlices(f64, &.{ 207, 208 }, &logits);
++    try std.testing.expectEqual(@as(f64, 7.5), ask.logsumexp);
++    try std.testing.expectEqual(@as(usize, 0), host.scores.running.items.len);
++}
++
++test "scores share a round's rows oldest first, and with nothing decoding each runs to its end" {
++    const gpa = std.testing.allocator;
++    var cfg = try lanes.Config.init(gpa, .{}, 1, 0);
++    defer cfg.deinit(gpa);
++    var target: lanes.fake.Fake = .{ .gpa = gpa };
++    defer target.deinit();
++    var vt: lanes.backend.Backend.VTable = undefined;
++    var clock: lanes.fake.FixedClock = .{};
++    var core: lanes.Engine = undefined;
++    var host = stepperHost(gpa, &cfg, &target, &vt, &clock, &core);
++    defer core.deinit();
++    defer scoring.close(&host);
++    var a_logits: [1]f64 = undefined;
++    var b_logits: [1]f64 = undefined;
++    var a: scoring.Ask = .{ .prompt = &.{ 1, 2, 3 }, .labels = &.{4}, .logits = &a_logits };
++    var b: scoring.Ask = .{ .prompt = &.{ 1, 2, 3 }, .labels = &.{4}, .logits = &b_logits };
++    try host.scores.asks.appendSlice(gpa, &.{ &a, &b });
++    scoring.answerWith(&host, 4);
++    try std.testing.expect(a.done and !b.done and b.job.?.fed == 1);
++    scoring.answerWith(&host, null); // idle: the rest now
++    try std.testing.expect(b.done and !b.failed);
++    try std.testing.expectEqualSlices(f64, &.{3}, &b_logits);
++}
++
++test "a score past TENSORFOLD_DECISION_MAX_TOKENS fails before a step, and a stop drops a score between steps" {
++    const log_level = std.testing.log_level;
++    std.testing.log_level = .err;
++    defer std.testing.log_level = log_level;
++    const gpa = std.testing.allocator;
++    var cfg = try lanes.Config.init(gpa, .{}, 1, 0);
++    defer cfg.deinit(gpa);
++    var target: lanes.fake.Fake = .{ .gpa = gpa };
++    defer target.deinit();
++    var vt: lanes.backend.Backend.VTable = undefined;
++    var clock: lanes.fake.FixedClock = .{};
++    var core: lanes.Engine = undefined;
++    var host = stepperHost(gpa, &cfg, &target, &vt, &clock, &core);
++    defer core.deinit();
++    const env = @import("sys").env;
++    try std.testing.expectEqual(@as(c_int, 0), env.setenv("TENSORFOLD_DECISION_MAX_TOKENS", "5", 1));
++    defer _ = env.unsetenv("TENSORFOLD_DECISION_MAX_TOKENS");
++    var logits: [1]f64 = undefined;
++    var long: scoring.Ask = .{ .prompt = &.{ 1, 2, 3, 4, 5, 6 }, .labels = &.{7}, .logits = &logits };
++    var half: scoring.Ask = .{ .prompt = &.{ 1, 2, 3, 4 }, .labels = &.{7}, .logits = &logits };
++    try host.scores.asks.appendSlice(gpa, &.{ &long, &half });
++    Stepper.steps = 0;
++    Stepper.drops = 0;
++    scoring.answerWith(&host, 2);
++    try std.testing.expect(long.done and long.failed);
++    try std.testing.expect(!half.done and half.job.?.state != null);
++    try std.testing.expectEqual(@as(usize, 1), Stepper.steps); // the long one never stepped
++    scoring.close(&host);
++    try std.testing.expect(half.done and half.failed);
++    try std.testing.expectEqual(@as(usize, 1), Stepper.drops);
++}
++
++test "an identity past 0 fails on a backend that scores only in one call" {
++    const log_level = std.testing.log_level;
++    std.testing.log_level = .err;
++    defer std.testing.log_level = log_level;
++    const gpa = std.testing.allocator;
++    var cfg = try lanes.Config.init(gpa, .{}, 1, 0);
++    defer cfg.deinit(gpa);
++    var target: lanes.fake.Fake = .{ .gpa = gpa };
++    defer target.deinit();
++    const plain = target.backend();
++    var vt = plain.vtable.*;
++    vt.score = Scorer.score;
++    var clock: lanes.fake.FixedClock = .{};
++    var core = lanes.Engine.init(gpa, &cfg, .{ .ptr = plain.ptr, .vtable = &vt }, clock.clock());
++    defer core.deinit();
++    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
++    try host.start();
++    defer host.stop();
++    var logits: [1]f64 = undefined;
++    try std.testing.expectError(error.Failed, host.engine().scoreAs(3, &.{1}, &.{2}, &logits, false));
++    _ = try host.engine().scoreAs(0, &.{1}, &.{2}, &logits, false);
++}
++
++test "score steps beside decoding streams take TENSORFOLD_DECISION_SHARE of the time at most" {
++    try std.testing.expectEqual(@as(i96, 900), scoring.owed(100, 0.1)); // 100 of every 1,000
++    try std.testing.expectEqual(@as(i96, 100), scoring.owed(100, 0.5));
++    try std.testing.expectEqual(@as(i96, 0), scoring.owed(100, 1)); // no share: steps every round
++    try std.testing.expectEqual(@as(i96, 0), scoring.owed(0, 0.1));
++}
+diff --git a/zig/src/core/lanes/backend.zig b/zig/src/core/lanes/backend.zig
+index 48e2c8ffa..b09a713b7 100644
+--- a/zig/src/core/lanes/backend.zig
++++ b/zig/src/core/lanes/backend.zig
+@@ -70,6 +70,21 @@ pub const DraftRequest = struct {
+ };
+ 
+ pub const Committed = struct { ptr: *anyopaque, call: *const fn (*anyopaque) void };
++
++/// A decision's label scores taken in steps between rounds (Backend.VTable.score_step), so decoding streams keep going:
++/// each step feeds at most `rows` more prompt rows (0: the rest), and the last reads one logit per label at the row
++/// after the prompt and, when `mass`, the vocabulary's logsumexp. The backend keeps its cache in `state` meanwhile.
++pub const ScoreJob = struct {
++    prompt: []const u32,
++    labels: []const u32,
++    logits: []f64,
++    mass: bool = false,
++    identity: u8 = 0, // the identity its request named, 0 the stock model
++    rows: usize = 0,
++    fed: usize = 0,
++    state: ?*anyopaque = null,
++    logsumexp: f64 = 0,
++};
+ pub const RoundObserver = struct { ptr: *anyopaque, done: *const fn (*anyopaque, []const []const u32) void };
+ 
+ pub const Backend = struct {
+@@ -133,6 +148,10 @@ pub const Backend = struct {
+         first_row: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!Row = null,
+         /// One logit per label at the row after `prompt` and, when `mass`, the vocabulary's logsumexp (decisions).
+         score: ?*const fn (ptr: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) anyerror!f64 = null,
++        /// `score` one step at a time (ScoreJob): true once the labels are read; an error leaves no state behind.
++        score_step: ?*const fn (ptr: *anyopaque, job: *ScoreJob) anyerror!bool = null,
++        /// Frees an unfinished ScoreJob's state (a stop between its steps).
++        score_drop: ?*const fn (ptr: *anyopaque, job: *ScoreJob) void = null,
+         /// Each branch's label logits at trunk ++ branch's last row (Engine.decide); Refused names its `problem`.
+         decide: ?*const fn (ptr: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64, problem: *[]const u8) anyerror!void = null,
+         /// `first` with the first token drawn among `mask`'s allowed tokens (structured output).
+diff --git a/zig/src/families/flashnext/cuda_lanes.zig b/zig/src/families/flashnext/cuda_lanes.zig
+index 0bf4124ec..9d02c6136 100644
+--- a/zig/src/families/flashnext/cuda_lanes.zig
++++ b/zig/src/families/flashnext/cuda_lanes.zig
+@@ -228,6 +228,8 @@ pub fn Namespace(comptime Tri: type) type {
+                     .tree = treeFn,
+                     .probabilities = probabilitiesFn,
+                     .score = @import("cuda_score.zig").Hook(Cuda, Tri).call,
++                    .score_step = @import("cuda_score.zig").Hook(Cuda, Tri).stepCall,
++                    .score_drop = @import("cuda_score.zig").Hook(Cuda, Tri).dropCall,
+                     .first_masked = firstMaskedFn,
+                 };
+                 const ranked_table = comptime @import("cuda_score.zig").withoutScore(scoring_table);
+diff --git a/zig/src/families/flashnext/cuda_score.zig b/zig/src/families/flashnext/cuda_score.zig
+index 00043dc97..e01b7d69d 100644
+--- a/zig/src/families/flashnext/cuda_score.zig
++++ b/zig/src/families/flashnext/cuda_score.zig
+@@ -20,6 +20,50 @@ pub fn labels(comptime Tri: type, e: *prompt.Engine, tri: Tri, context: usize, i
+     return if (mass) logsumexp(row) else 0;
+ }
+ 
++const ScoreJob = @import("lanes").backend.ScoreJob;
++
++/// One step of a decision's score (lanes ScoreJob), as `labels` scores it whole: the first step makes the decision's own
++/// cache with its identity's rows, each feeds `job.rows` more prompt rows (0: the rest), and the last reads the labels
++/// and frees the cache. Prompt fill gives the same rows at any cut, so the steps' answer is the whole pass's.
++pub fn stepJob(comptime Tri: type, e: *prompt.Engine, tri: Tri, context: usize, job: *ScoreJob) !bool {
++    const ids = job.prompt;
++    if (job.state == null) {
++        // every refusal before a cache is made
++        if (ids.len == 0 or ids.len > context or ids.len > prompt.max_tokens) return error.PromptOutsideContext;
++        if (job.labels.len == 0 or job.labels.len != job.logits.len) return error.UnexpectedTensor;
++        for (job.labels) |t| if (t >= prompt.vocabulary) return error.LabelOutsideVocabulary;
++        const seq = try e.gpa.create(prompt.Seq);
++        errdefer e.gpa.destroy(seq);
++        seq.* = try e.newSeq(ids.len);
++        seq.identity = job.identity;
++        job.state = seq;
++    }
++    errdefer dropJob(e, job);
++    const seq: *prompt.Seq = @ptrCast(@alignCast(job.state.?));
++    const left = ids.len - job.fed;
++    const n = if (job.rows == 0) left else @min(left, job.rows);
++    const last = n == left;
++    try e.forward(Tri, tri, seq, ids[job.fed..][0..n], .{ .logits = if (last) .last else .none });
++    job.fed += n;
++    if (!last) return false;
++    const row = std.mem.bytesAsSlice(u16, seq.logits[0 .. prompt.vocabulary * 2]);
++    for (job.labels, job.logits) |t, *v| {
++        v.* = mtp.promote(std.mem.littleToNative(u16, row[t]));
++        if (!std.math.isFinite(v.*)) return error.NonFiniteScore;
++    }
++    job.logsumexp = if (job.mass) try logsumexp(row) else 0;
++    dropJob(e, job);
++    return true;
++}
++
++/// Frees a score's cache between its steps (or after its last); none held: nothing to do.
++pub fn dropJob(e: *prompt.Engine, job: *ScoreJob) void {
++    const seq: *prompt.Seq = @ptrCast(@alignCast(job.state orelse return));
++    seq.deinit(e.gpa);
++    e.gpa.destroy(seq);
++    job.state = null;
++}
++
+ /// The bf16 row's logsumexp in f64; a non-finite row is refused.
+ fn logsumexp(row: []align(1) const u16) !f64 {
+     var top: f64 = -std.math.inf(f64);
+@@ -70,6 +114,7 @@ pub fn CapabilityCases(comptime Cuda: type) type {
+                 const scores = vt.score != null;
+                 try std.testing.expect(step != null and step == self.backend().vtable.prefill_step);
+                 try std.testing.expectEqual(r == 0, scores);
++                try std.testing.expectEqual(r == 0, vt.score_step != null and vt.score_drop != null);
+             }
+         }
+ 
+@@ -90,6 +135,17 @@ pub fn Hook(comptime Cuda: type, comptime Tri: type) type {
+             if (self.ranks != null) return error.UnsupportedRankOperation;
+             return labels(Tri, self.engine, self.tri(), self.context, ids, wanted, logits, mass);
+         }
++
++        pub fn stepCall(ptr: *anyopaque, job: *ScoreJob) anyerror!bool {
++            const self: *Cuda = @ptrCast(@alignCast(ptr));
++            if (self.ranks != null) return error.UnsupportedRankOperation;
++            return stepJob(Tri, self.engine, self.tri(), self.context, job);
++        }
++
++        pub fn dropCall(ptr: *anyopaque, job: *ScoreJob) void {
++            const self: *Cuda = @ptrCast(@alignCast(ptr));
++            dropJob(self.engine, job);
++        }
+     };
+ }
+ 
+@@ -97,5 +153,7 @@ pub fn Hook(comptime Cuda: type, comptime Tri: type) type {
+ pub fn withoutScore(comptime scored: @import("lanes").backend.Backend.VTable) @import("lanes").backend.Backend.VTable {
+     var v = scored;
+     v.score = null;
++    v.score_step = null;
++    v.score_drop = null;
+     return v;
+ }
+diff --git a/zig/src/native/cuda_bound.zig b/zig/src/native/cuda_bound.zig
+index e258af87c..8192a5212 100644
+--- a/zig/src/native/cuda_bound.zig
++++ b/zig/src/native/cuda_bound.zig
+@@ -133,6 +133,18 @@ pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
+                 return x.inner.vtable.score.?(x.inner.ptr, prompt, labels, logits, mass);
+             }
+         }.f else null,
++        .score_step = if (v.score_step != null) struct {
++            fn f(p: *anyopaque, job: *lanes.backend.ScoreJob) anyerror!bool {
++                const x = H.bind(p);
++                return x.inner.vtable.score_step.?(x.inner.ptr, job);
++            }
++        }.f else null,
++        .score_drop = if (v.score_drop != null) struct {
++            fn f(p: *anyopaque, job: *lanes.backend.ScoreJob) void {
++                const x = H.bind(p);
++                x.inner.vtable.score_drop.?(x.inner.ptr, job);
++            }
++        }.f else null,
+         .held = if (v.held != null) struct {
+             fn f(p: *anyopaque, s: *lanes.Stream, out: []u32) anyerror!void {
+                 const x = H.bind(p);
+@@ -297,6 +309,17 @@ test "each forwarded entry calls the family's entry of the same name, once" {
+                 return 0;
+             }
+         }.f,
++        .score_step = struct {
++            fn f(p: *anyopaque, _: *lanes.backend.ScoreJob) anyerror!bool {
++                Rec.hit(p, "score_step");
++                return true;
++            }
++        }.f,
++        .score_drop = struct {
++            fn f(p: *anyopaque, _: *lanes.backend.ScoreJob) void {
++                Rec.hit(p, "score_drop");
++            }
++        }.f,
+         .held = struct {
+             fn f(p: *anyopaque, _: *S, _: []u32) anyerror!void {
+                 Rec.hit(p, "held");
+@@ -367,6 +390,11 @@ test "each forwarded entry calls the family's entry of the same name, once" {
+     var label_logits: [0]f64 = .{};
+     _ = try w.score.?(p, &.{}, &.{}, &label_logits, true);
+     try rec.once("score");
++    var job: lanes.backend.ScoreJob = .{ .prompt = &.{}, .labels = &.{}, .logits = &label_logits };
++    _ = try w.score_step.?(p, &job);
++    try rec.once("score_step");
++    w.score_drop.?(p, &job);
++    try rec.once("score_drop");
+     try w.held.?(p, &s, &out);
+     try rec.once("held");
+     w.release(p, &s);

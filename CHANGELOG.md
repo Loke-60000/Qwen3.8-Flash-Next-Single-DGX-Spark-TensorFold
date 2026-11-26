@@ -5,6 +5,15 @@ Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:
 
 ## Unreleased
 
+**2026-11-26: decision model ids (`0015`, `0016`).** TensorFold v1.2.7 already served `/v1/decisions` and `/v1/systemone`
+on Flash Next through its score hook, but a score ran whole on the engine thread (a request decoding 77.6 tok/s fell to
+6.6 beside back-to-back 1,773-token decisions), read only the stock model, and had no model id of its own. `0015` takes
+a score in steps between rounds (`TENSORFOLD_DECISION_ROWS` rows, `TENSORFOLD_DECISION_SHARE` of the time while others
+decode, whole when idle, `TENSORFOLD_DECISION_MAX_TOKENS` cap) through an identity (`Engine.scoreAs`); `0016` adds
+`TENSORFOLD_DECISION_IDS` (`id=base`, listed in `/v1/models`, refused on text routes). Measured with
+`tools/decision_bench.py`: 75.7 tok/s alone, 72.4 beside decisions (20.9 with steps and no time share); decisions on the
+stock id give the same probabilities as before; a skuld id gives its own; `exact.py` passes.
+
 **2026-11-26: French and German replies draft from their own tokens (`0014`, `DRAFT_VOCAB`).** TensorFold's built-in
 draft list (79,591 ids) covers all of an English or code sample's tokens but 78.7% of a French one, 70% of German, 34.9% of
 Japanese and 27.5% of Arabic; the model's own French and German output had 16.5% of its tokens outside it. `0014` adds

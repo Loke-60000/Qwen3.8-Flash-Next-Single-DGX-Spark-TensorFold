@@ -179,6 +179,13 @@ SPILL_GIB="${SPILL_GIB:-}"
 # a list file, mounted into the container (scripts/draft-vocab-fr-de.txt is the built-in list plus the model's own French
 # and German tokens). Drafts are checked, so replies are the same with any list; only the drafts kept change.
 DRAFT_VOCAB="${DRAFT_VOCAB:-}"
+# Decision model ids (patch 0015): TENSORFOLD_DECISION_IDS=gl-zero-decision=gl-zero,gl-zero-skuld-decision=gl-zero-skuld
+# gives each listed base (SERVED_NAME, an alias or a TENSORFOLD_IDENTITIES id) a model id of its own that answers
+# POST /v1/decisions and /v1/systemone (choice, score and yes/no probabilities from one prompt pass, no text) and is
+# refused on text routes. Same weights: a decision reads the base's own next-token logits. While other requests decode, a
+# decision feeds at most TENSORFOLD_DECISION_ROWS prompt rows a round (256) so they keep decoding, and a decision prompt
+# past TENSORFOLD_DECISION_MAX_TOKENS (16384) is refused: its cache sits outside the streams' memory plan.
+export TENSORFOLD_DECISION_IDS="${TENSORFOLD_DECISION_IDS:-}"
 SPILL_DIR="${SPILL_DIR:-$HOME/.cache/tensorfold-qwen38/spilled}"
 SPILL_DAILY_GIB="${SPILL_DAILY_GIB:-24}"
 SPILL_MIN_FREE_GIB="${SPILL_MIN_FREE_GIB:-200}"
