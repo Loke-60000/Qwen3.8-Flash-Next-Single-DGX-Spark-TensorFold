@@ -1,9 +1,34 @@
 # Changelog
 
 Newest first. This recipe serves one DGX Spark. The image is `tensorfold-qwen38:v1.2.7-93a2e93`, built by
-`scripts/prepare.sh` from TensorFold v1.2.7 (`93a2e93e`) plus `patches/`: MiaAI-Lab's 0001 to 0005 and the lab's 0006 to 0011.
+`scripts/prepare.sh` from TensorFold v1.2.7 (`93a2e93e`) plus `patches/`: MiaAI-Lab's 0001 to 0005 and the lab's 0006 to 0013.
 
 ## Unreleased
+
+**2026-11-26: long conversations resume from the prompt cache, its disk tier, or the furthest state the cache holds (`0012`, `0013`).**
+Over 72 hours of the lab's traffic (1,255 requests), 86% of the engine's busy time was prefill (17.9 h against 2.8 h of decode) and only
+36% of prompt tokens came from the cache: `kept nothing at 135322 tokens: 2199 MiB passes the 2110 MiB budget`, so every turn of a 160k
+to 230k-token agent session prefilled from its first token (about 105 s). Changes, none of which change a reply:
+- `PROMPT_CACHE_GIB=8` in the lab's `.env` (3.5 to 4 GiB after the engine's halving, 1,386 pages instead of 1,543). A 122k-token session's
+  next turns: 0.31 s to the first token instead of 58.9 s, `cached` 122,665 of 122,692.
+- `0013`, `TENSORFOLD_PROMPT_CACHE_PARTIAL=1` (registry switch, off upstream, on in `scripts/config.sh`): a prompt whose every mark passes
+  the budget keeps the furthest state the budget holds beside the pass's other marks, and a guarded reservation makes room for it in the
+  endpoint's place. A 239,722-token session's next turns resumed at 222,976: 17 s to the first token instead of 118 s. Tests: two in
+  `prompt_cache_rewind_test.zig`, two in `prompt_cache_queue_room_test.zig` (the guarded one fails without the reservation change), the
+  environment test's exact-0-or-1 cases.
+- `SPILL_GIB` (new, `start.sh` and `scripts/config.sh`): TensorFold's `--spill-gib` disk tier under `SPILL_DIR`, with
+  `--learn-daily-gib $SPILL_DAILY_GIB` (24) and `--learn-min-free-gib $SPILL_MIN_FREE_GIB` (200), `TENSORFOLD_ROWS_SYNC=1` (pieces written
+  from the kept state, no staged copy: the Spark's free memory was already dipping under memguard's 7 GiB floor) and
+  `TENSORFOLD_ROWS_MIN_TOKENS=16384` from `0012` (test: `rows_spill_test.zig`). Checked with `tools/disk_check.py` (new): a 48,422-token
+  prompt pushed out by two 97,922-token ones came back from disk in 3.6 s instead of 22.7 s with the same reply byte for byte (858 MiB
+  read in 271 ms); that test wrote 3.1 GB. SMART before: 0% used, 12.9 TB written.
+- Checked on the new image: `exact.py --pad 3000` and `exact.py` (543 and 552 drafts accepted), `toolcheck.py` 3/3; host suites
+  `test-rows-host`, `test-prompt-cache-host`, `test-profile`, `test-environment-host`, `test-env-defaults-host`.
+- `tools/session_bench.py` (a growing session's time to first token and cached count) and `tools/depth_bench.py` (decode against
+  context depth) are new too.
+- Measured and not ported from prestonlogan's Hibana recipe: its long-context draft attention (decode here is 80.3 / 79.6 / 76.8 / 70.8
+  tok/s at 0 / 32k / 101k / 204k tokens of context, greedy code, one stream: the MTP head already attends sparsely past 2,048 keys) and its
+  draft vocabulary shortlist (TensorFold drafts from a built-in 79,591-token list already).
 
 **2026-11-19: TensorFold v1.2.7 and MiaAI-Lab's series (video, PDF, harden), with the lab's patches carried as `0006` to `0011`.**
 MiaAI-Lab's `main` merged into the lab branch. The lab's `0018` to `0020` (identities) went onto v1.2.7 by three-way merge; the paged fp8

@@ -38,7 +38,7 @@ is unchanged.
 
 ## This fork
 
-The lab's patches `0006` to `0011` sit on top of MiaAI-Lab's series (see `CREDITS.md`):
+The lab's patches `0006` to `0013` sit on top of MiaAI-Lab's series (see `CREDITS.md`):
 
 - **Per-request identities** (`0006` to `0008`): `TENSORFOLD_IDENTITIES=id=file,...` serves extra model ids from the same weights with
   abliteration directions applied per request; a file can be `hf:owner/repo/path[@revision]`, which `prepare.sh` downloads. `ABLIT=2`
@@ -50,10 +50,25 @@ The lab's patches `0006` to `0011` sit on top of MiaAI-Lab's series (see `CREDIT
 - **`PROMPT_CACHE_GIB`**: the prompt cache's cap. On v1.2.7 with pages the pool takes the room before the cache, and the pages are
   taken at start while the cache fills as it is used, so set both this and `TENSORFOLD_MEMORY_RESERVE_GIB` for the memory you can give.
 - **`restart.sh`**: a restart with the Spark's small services (embeddings, speech-to-text, tempo) paused during the load.
+- **Long conversations resume instead of prefilling again** (`0012`, `0013`, and settings). Measured on the lab's traffic over 72 hours
+  before this: 86% of the engine's busy time was prefill, and 517 of 1,086 prompts over 64k tokens kept nothing, because a kept state
+  costs about 16 KiB a token and the 2.1 GiB cache held nothing past about 130k tokens. Each turn of a 170k-token agent session then
+  waited about 105 s for its first token.
+  - `PROMPT_CACHE_GIB=8`: the engine gives the cache at most half of what is free once the pages are taken, so asking for 8 gives
+    3.5 to 4 GiB (one state up to about 220k tokens) and the pool 1,386 pages instead of 1,543.
+  - `TENSORFOLD_PROMPT_CACHE_PARTIAL=1` (`0013`): a prompt whose every state passes the budget keeps the furthest one the budget
+    holds beside the pass's other states, on a 256-token block edge, so its next turn prefills only the rest. Upstream keeps nothing.
+  - `SPILL_GIB=64`: TensorFold's own disk tier (`--spill-gib`) for states pushed out of RAM, and those in RAM at a planned stop, under
+    `SPILL_DIR`. A state is read back only when that is faster than its prefill, and every piece is hash-checked. The SSD's share is
+    bounded: `SPILL_DAILY_GIB=24` a day, `SPILL_MIN_FREE_GIB=200` kept free, rows two states share written once, and
+    `TENSORFOLD_ROWS_MIN_TOKENS=16384` (`0012`) keeps shorter states off the disk (prefilling them costs less than their ~110 MiB of
+    DeltaNet state). `TENSORFOLD_ROWS_SYNC=1` writes a block or a 16 MiB piece at a time straight from the kept state, with no staged
+    copy in memory; the cost is that an eviction writes on the engine thread, about 1 to 3 s for a 1.6 GiB state.
 
 The lab's Spark runs `PARALLEL=15`, `TF_FLASHNEXT_KV_PAGES=256`, `TF_FLASHNEXT_KV4=values`, `TENSORFOLD_MEMORY_RESERVE_GIB=12`,
-`PROMPT_CACHE_GIB=4`, `PDF=1`, `VIDEO=1`, beside about 8 GiB of other services: 1,621 pages (about 415k tokens) beside the engine's own
-262,144-token window and a 2.1 GiB prompt cache, with 9.5 GiB or more free under the stress runs below. Against the lab's v1.2.2 build
+`PROMPT_CACHE_GIB=8`, `SPILL_GIB=64`, `PDF=1`, `VIDEO=1`, beside about 8 GiB of other services: 1,386 pages (about 355k tokens) beside the
+engine's own 262,144-token window and a 3.5 to 4 GiB prompt cache. The table below is from the v1.2.7 port (`PROMPT_CACHE_GIB=4`, 1,621
+pages and a 2.1 GiB cache, with 9.5 GiB or more free under the stress runs). Against the lab's v1.2.2 build
 (same pool, `tools/bench_streams.py`, 256 tokens, greedy, median of 3; 5 runs at 12 and 15 streams):
 
 | | v1.2.2 lab build | this build |
