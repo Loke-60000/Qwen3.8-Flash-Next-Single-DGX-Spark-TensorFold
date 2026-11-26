@@ -7,7 +7,7 @@ hash, that the build verifies the tarball before untarring it and keeps the libr
 must not link FFmpeg at all), that start.sh only reaches for it with VIDEO=1, and that the README says what the wiring does.
 
 Runs start.sh's own VIDEO lines in a bash subshell with a stubbed `die`; reads scripts/config.sh, scripts/prepare.sh,
-start.sh, README.md and patches/. No Docker, no GPU, no network.
+start.sh, README-upstream.md and patches/. No Docker, no GPU, no network.
 
 Usage: tools/test_video_input.py
 """
@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG = (ROOT / "scripts" / "config.sh").read_text(encoding="utf-8")
 PREPARE = (ROOT / "scripts" / "prepare.sh").read_text(encoding="utf-8")
 START = (ROOT / "start.sh").read_text(encoding="utf-8")
-README = (ROOT / "README.md").read_text(encoding="utf-8")
+README = (ROOT / "README-upstream.md").read_text(encoding="utf-8")
 
 failures: list[str] = []
 

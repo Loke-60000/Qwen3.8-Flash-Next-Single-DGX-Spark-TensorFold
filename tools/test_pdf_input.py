@@ -6,7 +6,7 @@ pypdfium2 aarch64 wheel, so a pin that no longer matches the wheel, a build that
 that reaches the server without an opt-in are all things this checks offline.
 
 Runs start.sh's own PDF lines in a bash subshell with a stubbed `die`; reads scripts/config.sh, scripts/prepare.sh,
-start.sh and README.md. No Docker, no GPU, no network.
+start.sh and README-upstream.md. No Docker, no GPU, no network.
 
 Usage: tools/test_pdf_input.py
 """
@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG = (ROOT / "scripts" / "config.sh").read_text(encoding="utf-8")
 PREPARE = (ROOT / "scripts" / "prepare.sh").read_text(encoding="utf-8")
 START = (ROOT / "start.sh").read_text(encoding="utf-8")
-README = (ROOT / "README.md").read_text(encoding="utf-8")
+README = (ROOT / "README-upstream.md").read_text(encoding="utf-8")
 
 failures: list[str] = []
 

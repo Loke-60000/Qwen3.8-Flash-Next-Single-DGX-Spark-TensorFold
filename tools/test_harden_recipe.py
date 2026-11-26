@@ -6,7 +6,7 @@ The hardening layer from #77 is only safe while four things hold: nothing in the
 in the script would be a dependency change nobody reviewed), and a hardened image that cannot boot is thrown away
 rather than tagged. This checks all four offline, and that the README tells the truth about the CVE counts.
 
-Reads scripts/harden.sh, scripts/prepare.sh, start.sh and README.md, and runs `bash -n` over the script. No Docker, no GPU.
+Reads scripts/harden.sh, scripts/prepare.sh, start.sh and README-upstream.md, and runs `bash -n` over the script. No Docker, no GPU.
 
 Usage: tools/test_harden_recipe.py
 """
@@ -24,7 +24,7 @@ if not (ROOT / "scripts" / "harden.sh").exists():
 HARDEN = (ROOT / "scripts" / "harden.sh").read_text(encoding="utf-8")
 PREPARE = (ROOT / "scripts" / "prepare.sh").read_text(encoding="utf-8")
 START = (ROOT / "start.sh").read_text(encoding="utf-8")
-README = (ROOT / "README.md").read_text(encoding="utf-8")
+README = (ROOT / "README-upstream.md").read_text(encoding="utf-8")
 
 failures: list[str] = []
 

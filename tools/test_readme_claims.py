@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The README and start.sh's own usage say what this build actually serves.
 
-Offline: reads README.md, start.sh and scripts/prepare.sh from the repository.
+Offline: reads README-upstream.md, start.sh and scripts/prepare.sh from the repository.
 
 Two claims drift and have been reported:
   * #89: the docs offered a 1,048,576-token window with YaRN factor 4 while `start.sh` refuses any
@@ -16,7 +16,7 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-README = (ROOT / "README.md").read_text(encoding="utf-8")
+README = (ROOT / "README-upstream.md").read_text(encoding="utf-8")
 START = (ROOT / "start.sh").read_text(encoding="utf-8")
 PREPARE = (ROOT / "scripts" / "prepare.sh").read_text(encoding="utf-8")
 
@@ -49,7 +49,7 @@ guard = re.search(r"\(\(\s*CONTEXT\s*<=\s*(\d+)\s*\)\)", START)
 check("start.sh caps CONTEXT", [] if guard else ["no '(( CONTEXT <= N ))' guard found"])
 cap = int(guard.group(1)) if guard else 0
 check("the cap is the engine's native 262,144", [] if cap == 262144 else [f"the guard says {cap}"])
-check(f"README.md keeps the window at {cap}", window_problems("README.md", README, cap))
+check(f"README-upstream.md keeps the window at {cap}", window_problems("README-upstream.md", README, cap))
 check(f"start.sh keeps the window at {cap}", window_problems("start.sh", START, cap))
 
 # ---- images and video ---------------------------------------------------------------------
