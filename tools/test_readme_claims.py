@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The README and start.sh's own usage say what this build actually serves.
 
-Offline: reads README-upstream.md, start.sh and scripts/prepare.sh from the repository.
+Offline: reads README-upstream.md, start.sh and scripts/build-image.sh from the repository.
 
 Two claims drift and have been reported:
   * #89: the docs offered a 1,048,576-token window with YaRN factor 4 while `start.sh` refuses any
@@ -18,7 +18,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 README = (ROOT / "README-upstream.md").read_text(encoding="utf-8")
 START = (ROOT / "start.sh").read_text(encoding="utf-8")
-PREPARE = (ROOT / "scripts" / "prepare.sh").read_text(encoding="utf-8")
+BUILD = (ROOT / "scripts" / "build-image.sh").read_text(encoding="utf-8")
 
 failures: list[str] = []
 
@@ -54,7 +54,7 @@ check(f"start.sh keeps the window at {cap}", window_problems("start.sh", START, 
 
 # ---- images and video ---------------------------------------------------------------------
 
-serves_video = bool(re.search(r"zig build[^\n]*\bvideo\b", PREPARE)) or "libtfvideo" in PREPARE
+serves_video = bool(re.search(r"zig build[^\n]*\bvideo\b", BUILD)) or "libtfvideo" in BUILD
 if serves_video:
     print("ok   this build links a video decoder: the video checks do not apply")
 else:

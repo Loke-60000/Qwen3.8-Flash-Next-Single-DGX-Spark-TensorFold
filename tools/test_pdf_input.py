@@ -5,7 +5,7 @@ The engine reads PDF parts only with `--vision-pdf`, and only if it can load a P
 pypdfium2 aarch64 wheel, so a pin that no longer matches the wheel, a build that stops checking it, or a `--vision-pdf`
 that reaches the server without an opt-in are all things this checks offline.
 
-Runs start.sh's own PDF lines in a bash subshell with a stubbed `die`; reads scripts/config.sh, scripts/prepare.sh,
+Runs start.sh's own PDF lines in a bash subshell with a stubbed `die`; reads scripts/config.sh, scripts/build-image.sh,
 start.sh and README-upstream.md. No Docker, no GPU, no network.
 
 Usage: tools/test_pdf_input.py
@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = (ROOT / "scripts" / "config.sh").read_text(encoding="utf-8")
-PREPARE = (ROOT / "scripts" / "prepare.sh").read_text(encoding="utf-8")
+BUILD = (ROOT / "scripts" / "build-image.sh").read_text(encoding="utf-8")
 START = (ROOT / "start.sh").read_text(encoding="utf-8")
 README = (ROOT / "README-upstream.md").read_text(encoding="utf-8")
 
@@ -61,10 +61,10 @@ check(
 
 # ---- the build: download, verify, extract, install, point the engine at it ------------------
 
-dockerfile = PREPARE[PREPARE.find("<<'DOCKERFILE'"):]
+dockerfile = BUILD[BUILD.find("<<'DOCKERFILE'"):]
 check(
-    "prepare.sh passes the pin into the build",
-    [] if "--build-arg PYPDFIUM2_WHEEL_URL=" in PREPARE and "--build-arg PYPDFIUM2_AARCH64_SHA256=" in PREPARE
+    "build-image.sh passes the pin into the build",
+    [] if "--build-arg PYPDFIUM2_WHEEL_URL=" in BUILD and "--build-arg PYPDFIUM2_AARCH64_SHA256=" in BUILD
     else ["the docker build does not pass PYPDFIUM2_WHEEL_URL / PYPDFIUM2_AARCH64_SHA256"],
 )
 check(

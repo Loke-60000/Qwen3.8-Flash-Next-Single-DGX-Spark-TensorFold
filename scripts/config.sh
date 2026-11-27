@@ -96,7 +96,7 @@ IMAGE="${IMAGE:-tensorfold-qwen38:${TF_TAG}}"
 image_hash() {
   ( cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
     cat patches/*.patch 2>/dev/null
-    sed -n "/<<'DOCKERFILE'/,/^DOCKERFILE\$/p" scripts/prepare.sh
+    sed -n "/<<'DOCKERFILE'/,/^DOCKERFILE\$/p" scripts/build-image.sh
     echo "$TF_REPO $TF_REF zig-$ZIG_VERSION $ZIG_SHA256 $BASE_IMAGE jpeg-$LIBJPEG_TURBO_VERSION-$LIBJPEG_TURBO_SHA256 webp-$LIBWEBP_VERSION-$LIBWEBP_SHA256 pdfium-$PYPDFIUM2_VERSION-$PYPDFIUM2_AARCH64_SHA256 ffmpeg-$FFMPEG_VERSION-$FFMPEG_SHA256 grammar-$TF_RELEASE_VERSION-$TF_RELEASE_AARCH64_SHA256"
   ) | sha256sum | cut -c1-12
 }

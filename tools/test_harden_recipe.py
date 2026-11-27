@@ -6,7 +6,7 @@ The hardening layer from #77 is only safe while four things hold: nothing in the
 in the script would be a dependency change nobody reviewed), and a hardened image that cannot boot is thrown away
 rather than tagged. This checks all four offline, and that the README tells the truth about the CVE counts.
 
-Reads scripts/harden.sh, scripts/prepare.sh, start.sh and README-upstream.md, and runs `bash -n` over the script. No Docker, no GPU.
+Reads scripts/harden.sh, scripts/prepare.sh, scripts/build-image.sh, start.sh and README-upstream.md, and runs `bash -n` over the script. No Docker, no GPU.
 
 Usage: tools/test_harden_recipe.py
 """
@@ -23,6 +23,7 @@ if not (ROOT / "scripts" / "harden.sh").exists():
     sys.exit(1)
 HARDEN = (ROOT / "scripts" / "harden.sh").read_text(encoding="utf-8")
 PREPARE = (ROOT / "scripts" / "prepare.sh").read_text(encoding="utf-8")
+BUILD = (ROOT / "scripts" / "build-image.sh").read_text(encoding="utf-8")
 START = (ROOT / "start.sh").read_text(encoding="utf-8")
 README = (ROOT / "README-upstream.md").read_text(encoding="utf-8")
 
@@ -49,7 +50,7 @@ check(
     "scripts/harden.sh parses and nothing in the default path runs it",
     ([] if r.returncode == 0 else [f"bash -n: {r.stderr.strip()}"])
     + ([] if (ROOT / "scripts" / "harden.sh").stat().st_mode & 0o111 else ["scripts/harden.sh is not executable"])
-    + ([] if "harden.sh" not in PREPARE and "harden.sh" not in START else ["prepare.sh or start.sh calls harden.sh, so it is no longer opt-in"]),
+    + ([] if all("harden.sh" not in x for x in (PREPARE, BUILD, START)) else ["prepare.sh, build-image.sh or start.sh calls harden.sh, so it is no longer opt-in"]),
 )
 
 # ---- the base image is left alone, the result gets its own tag ----------------------------------

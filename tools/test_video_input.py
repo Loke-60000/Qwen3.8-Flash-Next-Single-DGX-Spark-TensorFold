@@ -6,7 +6,7 @@ TensorFold's tools/zig/build_ffmpeg.sh pins. So this checks, offline: that the F
 hash, that the build verifies the tarball before untarring it and keeps the library off the paths the server probes (VIDEO=0
 must not link FFmpeg at all), that start.sh only reaches for it with VIDEO=1, and that the README says what the wiring does.
 
-Runs start.sh's own VIDEO lines in a bash subshell with a stubbed `die`; reads scripts/config.sh, scripts/prepare.sh,
+Runs start.sh's own VIDEO lines in a bash subshell with a stubbed `die`; reads scripts/config.sh, scripts/build-image.sh,
 start.sh, README-upstream.md and patches/. No Docker, no GPU, no network.
 
 Usage: tools/test_video_input.py
@@ -20,7 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = (ROOT / "scripts" / "config.sh").read_text(encoding="utf-8")
-PREPARE = (ROOT / "scripts" / "prepare.sh").read_text(encoding="utf-8")
+BUILD = (ROOT / "scripts" / "build-image.sh").read_text(encoding="utf-8")
 START = (ROOT / "start.sh").read_text(encoding="utf-8")
 README = (ROOT / "README-upstream.md").read_text(encoding="utf-8")
 
@@ -66,10 +66,10 @@ check(
 
 # ---- the build: verify the tarball, build it, keep the library where the server cannot see it --
 
-dockerfile = PREPARE[PREPARE.find("<<'DOCKERFILE'"):]
+dockerfile = BUILD[BUILD.find("<<'DOCKERFILE'"):]
 check(
-    "prepare.sh passes the pin into the build",
-    [] if "--build-arg FFMPEG_VERSION=" in PREPARE and "--build-arg FFMPEG_SHA256=" in PREPARE
+    "build-image.sh passes the pin into the build",
+    [] if "--build-arg FFMPEG_VERSION=" in BUILD and "--build-arg FFMPEG_SHA256=" in BUILD
     else ["the docker build does not pass FFMPEG_VERSION / FFMPEG_SHA256"],
 )
 check(
