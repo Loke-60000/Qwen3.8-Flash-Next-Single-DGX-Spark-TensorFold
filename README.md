@@ -1,35 +1,35 @@
 <p align="center">
-  <img src="docs/images/A-flash-header-v46.jpg" alt="Qwen3.8 Flash Next NVFP4 on one DGX Spark: 80 tok/s on one coding request; prose 99.5, 175, 283.9 and 334.9 tok/s total with 2, 4, 8 and 15 requests at once" width="100%">
+  <img src="docs/images/A-flash-header-v46.jpg" alt="Qwen3.8 Flash Next NVFP4 on one DGX Spark. 80 tok/s on one coding request. Prose at 99.5, 175, 283.9 and 334.9 tok/s total with 2, 4, 8 and 15 requests at once" width="100%">
 </p>
 
 # Qwen3.8 Flash Next on one DGX Spark
 
-Serves Qwen3.8 Flash Next on a single DGX Spark with TensorFold's Zig engine, through an OpenAI-compatible API on port
-8888. One server holds one copy of NVIDIA's FP4 checkpoint and answers three kinds of model id:
+This recipe serves Qwen3.8 Flash Next on a single DGX Spark with TensorFold's Zig engine, through an OpenAI-compatible
+API on port 8888. One server holds one copy of NVIDIA's FP4 checkpoint and answers three kinds of model id:
 
 - **The stock model** (`Qwen3.8-Flash-Next` by default) for chat, tool calls, reasoning, and image, video and PDF input.
-- **Abliterated variants**, picked per request by model name (`Qwen3.8-Flash-Next-abliterated` with `ABLIT=2`). No second
-  copy of the weights.
-- **Decision ids** (`Qwen3.8-Flash-Next-decision`, ...) that give choice, score and yes/no answers read from the model's own
-  probabilities, without generating text.
+- **Abliterated variants**, picked per request by model name (`Qwen3.8-Flash-Next-abliterated` with `ABLIT=2`),
+  without a second copy of the weights.
+- **Decision ids** (`Qwen3.8-Flash-Next-decision`, ...) that answer choice, score and yes/no questions from the model's
+  own probabilities, without generating text.
 
 This branch, `main-gl`, is a fork of [MiaAI-Lab's recipe](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold).
 It adds per-request abliteration, long-conversation caching, a disk tier for prompt states, faster French and German
-drafting and the decision API. None of them changes the weights. The stock model's replies stay the same token for
-token, and an abliterated id only changes its own requests. MiaAI-Lab's README, with the
-full recipe reference, is [README-upstream.md](README-upstream.md). AI agents deploying it should read [README-agents.md](README-agents.md).
+drafting and the decision API. None of them changes the weights, and the stock model's replies stay the same token for
+token. An abliterated id only changes its own requests. MiaAI-Lab's README, with the full recipe reference, is
+[README-upstream.md](README-upstream.md), and AI agents that deploy this recipe should read [README-agents.md](README-agents.md).
 
 ## Speed
 
-All numbers are from one DGX Spark (GB10, 128 GB) with this branch. The server takes up to 15 requests at once,
-keeps keys in fp8 and values in NVFP4 in the KV cache, and drafts with MTP. Replies are greedy.
+All numbers come from one DGX Spark (GB10, 128 GB) running this branch with up to 15 requests at once. The KV cache
+holds keys in fp8 and values in NVFP4, the server drafts with MTP, and replies are greedy.
 
-![Speed by requests at once: total tok/s, tok/s per request and time to first token, for prose and code, from 1 to 15 requests](docs/images/A-flash-concurrency-v46.jpg)
+![Speed by requests at once. Total tok/s, tok/s per request and time to first token, for prose and code, from 1 to 15 requests](docs/images/A-flash-concurrency-v46.jpg)
 
 <details>
 <summary>Exact numbers</summary>
 
-Each request decodes 256 tokens from a short prompt, median of 3 runs. Thinking is on, so "code" includes the model's
+Each request decodes 256 tokens from a short prompt, and each number is the median of 3 runs. Thinking is on, so "code" includes the model's
 reasoning prose. Total is the sum of the requests' decode speeds.
 
 | Requests at once | Prose, total tok/s | Prose, each request | Prose, first token | Code, total tok/s | Code, each request | Code, first token |
@@ -44,14 +44,16 @@ reasoning prose. Total is the sum of the requests' decode speeds.
 
 </details>
 
-What one request decodes depends on the task. MTP drafting pays when the model's next tokens are easy to guess:
+How fast one request decodes depends on the task, because MTP drafting helps most when the model's next tokens are
+easy to guess.
 
-![Decode speed by task, one request: edit code 226-232 tok/s, write code 74.3, English prose 46.7, French prose 39.1](docs/images/A-flash-tasks-v46.jpg)
+![Decode speed by task, one request. Edit code 226-232 tok/s, write code 74.3, English prose 46.7, French prose 39.1](docs/images/A-flash-tasks-v46.jpg)
 
 <details>
 <summary>Exact numbers</summary>
 
-One request, 400 tokens, thinking off (`tools/vocab_bench.py`; code editing from section below).
+Measured with `tools/vocab_bench.py` on one request of 400 tokens with thinking off. The code editing row comes from the
+section below.
 
 | Task | Decode tok/s | Drafts kept |
 | --- | ---: | ---: |
@@ -63,10 +65,10 @@ One request, 400 tokens, thinking off (`tools/vocab_bench.py`; code editing from
 
 </details>
 
-Editing code is the fastest case. The reply copies most of the file from the prompt, the engine drafts those tokens
-straight from it, and nearly every draft is kept:
+Editing code is the fastest case. The reply copies most of the file from the prompt, so the engine drafts those tokens
+straight from it and keeps nearly every draft.
 
-![Decode speed when editing code: a 395-line file at 273.3 tok/s, a 76-line file at 226-232 tok/s, new code at 78-84 tok/s](docs/images/A-flash-edit-v46.jpg)
+![Decode speed when editing code. A 395-line file at 273.3 tok/s, a 76-line file at 226-232 tok/s, new code at 78-84 tok/s](docs/images/A-flash-edit-v46.jpg)
 
 <details>
 <summary>Exact numbers</summary>
@@ -81,10 +83,10 @@ straight from it, and nearly every draft is kept:
 
 ## Long prompts and conversations
 
-The window is 262,144 tokens. Prefill runs at about 2,200 tok/s whatever the length, and decode loses 12% from an empty
-context to 204K tokens:
+The window is 262,144 tokens. Prefill holds about 2,200 tok/s at any length, and decode loses only 12% between an empty
+context and 204K tokens.
 
-![Speed with long prompts: prefill about 2,167 tok/s up to 126K tokens; decode 80.3 tok/s at no context down to 70.8 at 204K](docs/images/A-flash-long-context-v46.jpg)
+![Speed with long prompts. Prefill about 2,167 tok/s up to 126K tokens. Decode 80.3 tok/s at no context, down to 70.8 at 204K](docs/images/A-flash-long-context-v46.jpg)
 
 <details>
 <summary>Exact numbers</summary>
@@ -110,13 +112,13 @@ context to 204K tokens:
 A conversation's next turn resumes from the prompt cache instead of reading its whole history again. Three things keep
 long agent sessions cached:
 
-- **The prompt cache** (`PROMPT_CACHE_GIB`) keeps whole states of recent conversations in memory, about 16 KiB a token.
+- **The prompt cache** (`PROMPT_CACHE_GIB`) keeps whole states of recent conversations in memory, at about 16 KiB a token.
 - **Partial keep** (`TENSORFOLD_PROMPT_CACHE_PARTIAL=1`, patch `0013`) lets a conversation longer than the cache keep
   the furthest state that fits, so its next turn reads only the rest.
-- **The disk tier** (`SPILL_GIB`, patch `0012`) writes a state pushed out of memory to the SSD and reads it back when its
-  conversation returns.
+- **The disk tier** (`SPILL_GIB`, patch `0012`) writes a state pushed out of memory to the SSD and reads it back when
+  its conversation returns.
 
-![Time to first token, cold and cached: a 189K-token conversation 92.67 s cold and 37.43 s with 122K tokens cached; a 48K-token conversation 22.72 s cold and 2.66 s read back from disk](docs/images/A-flash-next-turn-v46.jpg)
+![Time to first token, cold and cached. A 189K-token conversation takes 92.67 s cold and 37.43 s with 122K tokens cached. A 48K-token conversation takes 22.72 s cold and 2.66 s read back from disk](docs/images/A-flash-next-turn-v46.jpg)
 
 <details>
 <summary>Exact numbers</summary>
@@ -128,45 +130,47 @@ long agent sessions cached:
 | 48K conversation, first turn | 48,422 | 0 | 22.72 s |
 | 48K conversation, back from the disk tier | 48,422 | 48,415 | 2.66 s |
 
-With a 2.1 GiB prompt cache. With a 3.6 GiB cache a 122K conversation's next turn takes 0.31 s, but that needs memory the
-lab's Spark keeps for other services.
+These numbers use a 2.1 GiB prompt cache. A 3.6 GiB cache brings a 122K conversation's next turn down to 0.31 s, but it
+needs memory that the lab's Spark keeps for other services.
 
 </details>
 
-[docs/long-conversations.md](docs/long-conversations.md) explains how the disk tier spares the SSD, and lists its settings.
+[docs/long-conversations.md](docs/long-conversations.md) explains how the disk tier spares the SSD and lists its
+settings.
 
 ## Per-request abliteration
 
-![Stock and abliterated on one DGX Spark: per-request abliteration needs 81 GiB of weights on one Spark, two separate models 162 GiB on two](docs/images/A-flash-abliteration-v46.jpg)
+![Stock and abliterated on one DGX Spark. Per-request abliteration needs 81 GiB of weights on one Spark. Two separate models need 162 GiB on two](docs/images/A-flash-abliteration-v46.jpg)
 
 `ABLIT=2` serves the stock model and an abliterated one from the same weights. The abliterated id,
-`Qwen3.8-Flash-Next-abliterated`, applies house-qsa refusal directions to each of its requests' rows (patches `0006` to
-`0008`); requests to the stock id are untouched.
+`Qwen3.8-Flash-Next-abliterated`, applies house-qsa refusal directions to the rows of each of its requests (patches
+`0006` to `0008`), and requests to the stock id stay untouched.
 
 ```bash
 ABLIT=2 ./start.sh restart
 ```
 
-The abliterated model has had its safety refusals removed. Read the directions' model card before serving it.
-`ABLIT=1`, which grafts an abliteration overlay into the checkpoint instead, is described in
-[README-upstream.md](README-upstream.md#ablit-opt-in).
+The abliterated model has its safety refusals removed, so read the directions' model card before you serve it.
+`ABLIT=1` grafts an abliteration overlay into the checkpoint instead, as
+[README-upstream.md](README-upstream.md#ablit-opt-in) describes.
 
-Your own abliterated ids, directions files and how it works are in [docs/ablation.md](docs/ablation.md).
+[docs/ablation.md](docs/ablation.md) explains how it works and covers your own abliterated ids and directions files.
 
 ## Decision API
 
-A decision id answers choice, score and yes/no questions about an input. The model generates no text. It reads the
-probability of each option's label after one pass over the prompt. A request's questions share one read of the input,
-then each question costs only its own few tokens.
+A decision id answers choice, score and yes/no questions about an input without generating text. It reads the
+probability of each option's label after one pass over the prompt. The questions in one request share that one read of
+the input, so each extra question costs only its own few tokens.
 
-![Decision API: 0.20 s for a yes/no answer on a 23-token input, 0.70 s on a 1,262-token input, 26 options cost about the same as 2, and 96% of decode speed kept while decisions run beside it](docs/images/A-flash-decision-api-v46.jpg)
+![Decision API. 0.20 s for a yes/no answer on a 23-token input and 0.70 s on a 1,262-token input. 26 options cost about the same as 2. Decode keeps 96% of its speed while decisions run beside it](docs/images/A-flash-decision-api-v46.jpg)
 
-![Decisions without generating text: seconds to answer by questions on one input; 1,262-token input from 0.70 s for 1 question to 2.17 s for 16](docs/images/A-flash-decisions-v46.jpg)
+![Decisions without generating text. Seconds to answer by number of questions on one input. A 1,262-token input goes from 0.70 s for 1 question to 2.17 s for 16](docs/images/A-flash-decisions-v46.jpg)
 
 <details>
 <summary>Exact numbers</summary>
 
-`tools/decision_latency.py`, median of 3, server idle. `input_tokens` counts the input text alone.
+Measured with `tools/decision_latency.py` on an idle server, median of 3 runs. `input_tokens` counts the input text
+alone.
 
 | Input tokens | 1 question | 2 | 4 | 8 | 16 |
 | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -179,9 +183,10 @@ then each question costs only its own few tokens.
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Seconds | 0.71 | 0.71 | 0.72 | 0.72 | 0.76 |
 
-A request decoding 75.7 tok/s alone keeps 72.4 tok/s while decisions arrive back to back beside it. Decisions wait longer then.
-A 1-question decision on a 283-token input takes 4.4 s instead of 0.33 s, and on a 5,313-token input 36.5 s instead of
-2.45 s. `TENSORFOLD_DECISION_SHARE` sets that balance, see [docs/decision-api.md](docs/decision-api.md#under-load).
+A request that decodes 75.7 tok/s alone keeps 72.4 tok/s while decisions arrive back to back beside it, but the decisions
+wait longer. A 1-question decision then takes 4.4 s instead of 0.33 s on a 283-token input, and 36.5 s instead of 2.45 s
+on a 5,313-token one. `TENSORFOLD_DECISION_SHARE` sets that balance (see
+[docs/decision-api.md](docs/decision-api.md#under-load)).
 
 </details>
 
@@ -198,8 +203,8 @@ Request shapes, examples for both endpoints and the load settings are in [docs/d
 - A DGX Spark (or another GB10 system with 128 GB unified memory) with nothing else large on the GPU. `start.sh` needs
   about 107 GiB of `MemAvailable` at start and stops below that.
 - Docker with the NVIDIA container runtime, and your user in the `docker` group.
-- About 160 GB of free disk on a fresh machine, for the checkpoint (about 96 GiB, under `~/.cache/huggingface`), the image
-  and room to keep 100 GB free. The disk tier, when on, keeps `SPILL_MIN_FREE_GIB` free on top.
+- About 160 GB of free disk on a fresh machine, for the checkpoint (about 96 GiB, under `~/.cache/huggingface`),
+  the image and room to keep 100 GB free. With the disk tier on, it also keeps `SPILL_MIN_FREE_GIB` free.
 - A Hugging Face token (`HF_TOKEN` or `hf auth login`) is optional. The checkpoint is public, but `ABLIT=1` needs a token.
 
 ## Quick start
@@ -210,8 +215,8 @@ cd Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold
 ./start.sh
 ```
 
-The first run builds the image (TensorFold v1.2.7 plus `patches/0001` to `0017`) and downloads the checkpoint (about 96
-GiB). Later starts only load the weights. `start.sh` prints `Qwen3.8-Flash-Next is now LIVE! on
+The first run builds the image (TensorFold v1.2.7 plus `patches/0001` to `0017`) and downloads the checkpoint
+(about 96 GiB). Later starts only load the weights, and `start.sh` prints `Qwen3.8-Flash-Next is now LIVE! on
 port 8888` once a smoke test passes.
 
 ```bash
@@ -233,9 +238,9 @@ docker logs -f qwen38-flash-next-tf
 
 ## Configuration
 
-Settings go in `.env` beside `start.sh` (`KEY=value` lines, read, never run). This branch's settings and the ones the
-benchmarks ran with are in [docs/configuration.md](docs/configuration.md). MiaAI-Lab's settings (window, sampling, vision,
-video, PDF, KV format) are in [README-upstream.md](README-upstream.md#configuration).
+Settings go in `.env` beside `start.sh` as `KEY=value` lines, which are read and never run.
+[docs/configuration.md](docs/configuration.md) lists this branch's settings and the ones the benchmarks ran with.
+MiaAI-Lab's settings (window, sampling, vision, video, PDF, KV format) are in [README-upstream.md](README-upstream.md#configuration).
 
 ## Patches
 
@@ -257,17 +262,17 @@ they're on [tensorfold-gl](https://github.com/Loke-60000/tensorfold-gl/tree/abla
 | `0016` | `TENSORFOLD_DECISION_IDS`, decision model ids | Loke-60000 |
 | `0017` | a decision's questions read their shared input once | Loke-60000 |
 
-Tested with `tools/exact.py`, `tools/toolcheck.py`, `tools/disk_check.py` and the engine's host tests. Drafted replies,
-concurrent replies and replies resumed from disk all match a plain one-at-a-time reply. Applied to `93a2e93e`, the
-patches give back exactly the tree that was tested.
+The patches are tested with `tools/exact.py`, `tools/toolcheck.py`, `tools/disk_check.py` and the engine's host tests.
+Drafted replies, concurrent replies and replies resumed from disk all match a plain one-at-a-time reply, and applying
+the patches to `93a2e93e` gives back exactly the tree that was tested.
 
 ## License
 
-MIT for this repository's scripts, see [LICENSE](LICENSE). The model weights aren't part of this repository. NVIDIA's
-FP4 checkpoint is under the [NVIDIA Open Model Agreement](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-agreement/),
-and its base model, Qwen3.8 Flash Next, under the Qwen Community License 1.0. The image is built on NVIDIA's PyTorch
-container, whose software is under NVIDIA's own license terms, printed at every start. TensorFold and the patches to it
-are under TensorFold's licenses.
+This repository's scripts are under MIT (see [LICENSE](LICENSE)). The model weights aren't part of this repository.
+NVIDIA's FP4 checkpoint is under the [NVIDIA Open Model Agreement](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-agreement/),
+and its base model, Qwen3.8 Flash Next, is under the Qwen Community License 1.0. The image is built on NVIDIA's PyTorch
+container, whose software is under NVIDIA's own license terms, printed at every start. TensorFold and the
+patches to it are under TensorFold's licenses.
 
 ## Credits
 
@@ -275,14 +280,14 @@ are under TensorFold's licenses.
   [Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold)
   this branch builds on, with patches `0001` to `0005`. Everything credited in [CREDITS.md](CREDITS.md) applies here.
 - **Engine:** [TensorFold](https://github.com/ashhart/TensorFold) v1.2.7 by Ash Hart ([ashhart](https://github.com/ashhart))
-  and the TensorFold contributors, including the Flash Next CUDA engine, the prompt cache and its disk tier, the
+  and the TensorFold contributors, for the Flash Next CUDA engine, the prompt cache and its disk tier, the
   `/v1/decisions` and `/v1/systemone` routes and MTP drafting. The Zig CUDA serving path is by Jürgen Schmied
   ([jschmied](https://github.com/jschmied)).
 - **Video input (patch `0005`):** [chai-md](https://github.com/chai-md).
-- **French and German draft lists:** from MiaAI-Lab's `lang-draft-vocabs` branch, which took them from the language draft
-  vocabularies by Javier ([jvr0x](https://github.com/jvr0x)).
+- **French and German draft lists:** from MiaAI-Lab's `lang-draft-vocabs` branch, which took them from the language
+  draft vocabularies by Javier ([jvr0x](https://github.com/jvr0x)).
 - **Abliteration:** the "house-qsa" abliteration is [drowzeys](https://huggingface.co/drowzeys)'s Keys overlay
-  ([drowzeys/keys-Qwen3.8-Flash-Next-NVFP4-FP4-QAD-house-qsa-L3-47](https://huggingface.co/drowzeys/keys-Qwen3.8-Flash-Next-NVFP4-FP4-QAD-house-qsa-L3-47));
+  ([drowzeys/keys-Qwen3.8-Flash-Next-NVFP4-FP4-QAD-house-qsa-L3-47](https://huggingface.co/drowzeys/keys-Qwen3.8-Flash-Next-NVFP4-FP4-QAD-house-qsa-L3-47)).
   `ABLIT=2` serves it per request as directions
   ([Loke-60000/Qwen3.8-Flash-Next-FP4-Local-house-qsa-directions](https://huggingface.co/Loke-60000/Qwen3.8-Flash-Next-FP4-Local-house-qsa-directions)).
 - **Model:** [Qwen3.8 Flash Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by the Qwen team (Alibaba).

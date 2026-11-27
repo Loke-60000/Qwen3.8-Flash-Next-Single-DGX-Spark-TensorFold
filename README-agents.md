@@ -1,12 +1,12 @@
 # How AI agents deploy Qwen3.8 Flash Next
 
-You are an AI agent asked to serve Qwen3.8 Flash Next on a DGX Spark with this repository. Follow these steps in order.
+You're an AI agent asked to serve Qwen3.8 Flash Next on a DGX Spark with this repository. Follow these steps in order.
 Deploy only when no server is running. The README for people is [README.md](README.md).
 
 ## Rules
 
-- Do not stop, restart or replace a running server unless the user asks for it. A restart drops every request in flight and
-  takes the model offline while the weights load.
+- Do not stop, restart or replace a running server unless the user asks for it. A restart drops every request in flight
+  and takes the model offline while the weights load.
 - Do not delete `~/.cache/huggingface` (the 96 GiB checkpoint), the Docker image `tensorfold-qwen38:*` or `SPILL_DIR`.
 - Do not edit `patches/` or `scripts/`. Settings go in `.env`.
 - Do not commit `.env`, and do not put a Hugging Face token in any file of the repository.
@@ -20,12 +20,12 @@ curl -sf --max-time 5 http://127.0.0.1:8888/v1/models
 docker ps --filter name=qwen38-flash-next-tf --format '{{.Names}} {{.Status}} {{.Image}}'
 ```
 
-- **`/v1/models` answers with a model list:** the model is served. Do not deploy. Report the ids and the port to the user,
-  then stop here.
-- **The container runs but `/v1/models` does not answer:** it is still loading (about a minute after a start). Watch
-  `docker logs -f qwen38-flash-next-tf` for up to 10 minutes, then check again. If it never answers, report the log's last
-  lines to the user. Do not restart it yourself.
-- **Nothing answers and no container runs:** continue with step 2.
+- **If `/v1/models` answers with a model list**, the model is served. Do not deploy. Report the ids and the port to the
+  user, then stop here.
+- **If the container runs but `/v1/models` doesn't answer**, the server is still loading, which takes about a minute
+  after a start. Watch `docker logs -f qwen38-flash-next-tf` for up to 10 minutes, then check again. If it never answers,
+  report the log's last lines to the user. Do not restart it yourself.
+- **If nothing answers and no container runs**, continue with step 2.
 
 If the user gave another port, or the repository's `.env` sets `PORT=`, check that port instead of 8888.
 
@@ -42,12 +42,12 @@ df -BG --output=avail,target "$HOME" "$(docker info --format '{{.DockerRootDir}}
 ss -ltn 'sport = :8888'                                    # must print no listener
 ```
 
-- **Less than 107 GiB available:** something else holds memory, often another model server. List it with
-  `nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv` and ask the user what to stop. Do not stop it
-  yourself.
-- **Port 8888 in use by something else:** ask the user for another port and put `PORT=<port>` in `.env`.
-- **Less disk than needed:** if the checkpoint is already in `~/.cache/huggingface/hub/models--nvidia--Qwen3.8-Flash-Next-FP4-Local`,
-  96 GiB less is needed. Otherwise ask the user where to free space.
+- **If less than 107 GiB is available**, something else holds memory, often another model server. List it with
+  `nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv`, then ask the user what to stop. Do not
+  stop it yourself.
+- **If something else uses port 8888**, ask the user for another port and put `PORT=<port>` in `.env`.
+- **If there's less free disk than needed**, check `~/.cache/huggingface/hub/models--nvidia--Qwen3.8-Flash-Next-FP4-Local`.
+  If the checkpoint is already there, the deploy needs 96 GiB less. Otherwise, ask the user where to free space.
 
 ## 3. Get the repository
 
@@ -61,13 +61,13 @@ fi
 cd Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold
 ```
 
-The default branch is `main-gl`. If a checkout exists, use it as it is. Do not pull, reset or switch branches unless the user
-asks. Report its branch if it is not `main-gl`.
+The default branch is `main-gl`. If a checkout exists, use it as it is, and report its branch if it isn't `main-gl`.
+Do not pull, reset or switch branches unless the user asks.
 
 ## 4. Settings
 
-The defaults work without a `.env`. The model id is `Qwen3.8-Flash-Next`, port 8888, up to 5 requests at once. Write `.env`
-only for what the user asked. Common lines:
+The defaults work without a `.env` and serve the model id `Qwen3.8-Flash-Next` on port 8888, with up to 5 requests at
+once. Write `.env` only for what the user asked. Common lines:
 
 ```bash
 SERVED_NAME=Qwen3.8-Flash-Next                                      # the model id clients use
@@ -88,24 +88,24 @@ Check what a start would do first:
 DRY_RUN=1 ./start.sh
 ```
 
-It prints the model, the memory it needs and the docker command, and changes nothing. Read its warnings, fix them, then
-start:
+It prints the model, the memory it needs and the docker command, and changes nothing. Read its warnings and fix them,
+then start:
 
 ```bash
 ./start.sh
 ```
 
-The first run builds the image and downloads the 96 GiB checkpoint, so it takes as long as that download plus the build.
-Run it in the background with a timeout of at least 2 hours, and send its output to a log file. A later start loads the
-weights in about a minute.
-It is done when the log shows `is now LIVE! on port 8888`. `start.sh` exits 0 then.
+The first run builds the image and downloads the 96 GiB checkpoint, so it takes as long as that download plus the
+build. Run it in the background with a timeout of at least 2 hours, and send its output to a log file. A later start
+loads the weights in about a minute.
+The start is done when the log shows `is now LIVE! on port 8888`, and `start.sh` then exits 0.
 
 | `start.sh` says | Do this |
 | --- | --- |
 | `... is already running ...: nothing to do.` | The server runs. Go to step 6. |
 | `another ./start.sh is already running` | Someone else is deploying. Wait for it, then go to step 1. |
-| `port 8888 is already in use` | Step 2, port check. |
-| `only N GiB memory available` | Step 2, memory check. Do not use `MEM_CHECK=0`. |
+| `port 8888 is already in use` | Go back to the port check in step 2. |
+| `only N GiB memory available` | Go back to the memory check in step 2. Do not use `MEM_CHECK=0`. |
 | `not ready after 1800s` | The server is still loading. Watch `docker logs -f qwen38-flash-next-tf`. |
 | A download error from Hugging Face | Check the network. `ABLIT=1` needs a token, so ask the user for one. |
 
@@ -119,7 +119,7 @@ curl -s http://127.0.0.1:8888/v1/chat/completions -H 'Content-Type: application/
   "max_tokens": 1000}'
 ```
 
-Use the `SERVED_NAME` from `.env` if it is set. The reply must have non-empty `content`; the model thinks first, so keep
+If `.env` sets `SERVED_NAME`, use that name. The reply must have non-empty `content`. The model thinks first, so keep
 `max_tokens` at 1000 or more. If decision ids are on, also check one:
 
 ```bash
@@ -131,8 +131,8 @@ curl -s http://127.0.0.1:8888/v1/decisions -H 'Content-Type: application/json' -
 
 The answer must have `answers.q.probabilities` with `yes` and `no`.
 
-Then run the exactness check, `python3 tools/exact.py`. It takes under a minute, puts little load on the server, and must
-print `exact: PASS`.
+Then run the exactness check with `python3 tools/exact.py`. It takes under a minute, puts little load on the server,
+and must print `exact: PASS`.
 
 ## 7. Report to the user
 
@@ -143,5 +143,5 @@ Tell the user:
 - each line you added or changed in `.env`,
 - the result of `tools/exact.py`.
 
-`./stop.sh` stops the server, and `./start.sh restart` applies a changed `.env`. Both take the model offline, so do
-them only when the user asks.
+`./stop.sh` stops the server, and `./start.sh restart` applies a changed `.env`. Both take the model offline, so run them
+only when the user asks.
