@@ -100,10 +100,10 @@ image_hash() {
     echo "$TF_REPO $TF_REF zig-$ZIG_VERSION $ZIG_SHA256 $BASE_IMAGE jpeg-$LIBJPEG_TURBO_VERSION-$LIBJPEG_TURBO_SHA256 webp-$LIBWEBP_VERSION-$LIBWEBP_SHA256 pdfium-$PYPDFIUM2_VERSION-$PYPDFIUM2_AARCH64_SHA256 ffmpeg-$FFMPEG_VERSION-$FFMPEG_SHA256 grammar-$TF_RELEASE_VERSION-$TF_RELEASE_AARCH64_SHA256"
   ) | sha256sum | cut -c1-12
 }
-GHCR_IMAGE="${GHCR_IMAGE:-ghcr.io/miaai-lab/qwen3.8-flash-next-single-dgx-spark-tensorfold}"
+GHCR_IMAGE="${GHCR_IMAGE:-ghcr.io/loke-60000/qwen3.8-flash-next-single-dgx-spark-tensorfold}"
 # The published image of the current patch set (scripts/publish-image.sh): prepare.sh pulls it by digest while the patch hash matches IMAGE_TAG.
 # None is published for the v1.2.7 patch set yet, so prepare.sh tries $GHCR_IMAGE:<tag> and otherwise builds locally.
-# The v1.1.4 image stays in the registry: v1.1.4-eab8582-4baf16137ecd, sha256:5c6c42b9747318c1cd8b6cb85cb69493fff2e82cb23b61e49b9cf54cd09ac28e.
+# MiaAI-Lab's v1.1.4 image stays in ghcr.io/miaai-lab/qwen3.8-flash-next-single-dgx-spark-tensorfold: v1.1.4-eab8582-4baf16137ecd, sha256:5c6c42b9747318c1cd8b6cb85cb69493fff2e82cb23b61e49b9cf54cd09ac28e.
 IMAGE_TAG="${IMAGE_TAG:-}"
 IMAGE_DIGEST="${IMAGE_DIGEST:-}"
 prebuilt_image() {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Push the image scripts/prepare.sh built to GitHub Container Registry as $GHCR_IMAGE:<TensorFold version>-<patches hash>
 # and :latest (with DRAFT_LANGUAGE set: the language image, as :languages), labelled with this repository (so the
-# package takes the repository's visibility and access).
+# package takes the repository's access; a new package starts private, so make it public once in its settings).
 # Needs a GitHub token with write:packages: `gh auth login -s write:packages`, or GHCR_TOKEN / GITHUB_TOKEN set.
 # Usage: scripts/publish-image.sh                    # the default image
 #        DRAFT_LANGUAGE=zh scripts/publish-image.sh  # the language image (any DRAFT_LANGUAGE selects it)
@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")/.."
 source ./scripts/config.sh
 
-REPO_URL="${REPO_URL:-https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold}"
+REPO_URL="${REPO_URL:-https://github.com/Loke-60000/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold}"
 docker image inspect "$IMAGE" >/dev/null 2>&1 || die "image $IMAGE missing, run scripts/prepare.sh first"
 hash=$(docker image inspect -f '{{index .Config.Labels "tf.patches"}}' "$IMAGE")
 [[ "$hash" == "$(image_hash)" ]] || die "$IMAGE was built from other patches; run scripts/prepare.sh first"
