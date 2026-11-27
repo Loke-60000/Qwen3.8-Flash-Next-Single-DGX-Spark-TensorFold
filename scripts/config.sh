@@ -143,6 +143,10 @@ export TF_FLASHNEXT_GDN_LANES="${TF_FLASHNEXT_GDN_LANES:-1}"
 # NVFP4 prompt experts on the shared-memory K32 tiles adapted from our patch 0014 (2: gate/up and down; 1 gate/up only; 0 off).
 export TF_FLASHNEXT_WARM_AHEAD="${TF_FLASHNEXT_WARM_AHEAD:-1}"
 export TF_FLASHNEXT_PROMPT_EXPERT_TILE="${TF_FLASHNEXT_PROMPT_EXPERT_TILE:-2}"
+# With TF_FLASHNEXT_KV_PAGES, every request takes its caches from the page pool made at load. With 0, a request that runs alone
+# takes them from the driver when it starts, outside the reserve, and a long prompt can fail for memory or make the kernel kill
+# another service. Replies are the same either way (exact.py).
+export TF_FLASHNEXT_KV_PAGES_ALL="${TF_FLASHNEXT_KV_PAGES_ALL:-1}"
 # Prefill (patch 0004, the v1.1.4 series' 0006 and 0015 ported): prompt passes run the MXFP8 projections 1,024 columns or wider on a
 # 128 x 128 tile with the block scales folded into the weights (one fp32 sum over K; 1.4-1.65x the exact lane at a 3,072-row chunk,
 # +7-9% prefill; calls of 128 rows or fewer take its 64 x 64 form, same bits, so short prompts are not slower). Unlike the switches above it changes a prompt's numbers (within the exact kernels' rounding bound; each row's bits

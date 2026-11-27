@@ -21,6 +21,7 @@ This branch adds:
 | `TENSORFOLD_DECISION_ROWS` | `256` | Prompt rows a decision feeds in one step beside decoding requests. |
 | `TENSORFOLD_DECISION_MAX_TOKENS` | `16384` | The longest decision prompt. |
 | `TENSORFOLD_MEMORY_RESERVE_GIB` | `9` | Memory the engine leaves free. Raise it when other services share the Spark. The lab runs 15 beside about 8 GiB of speech and embedding services. |
+| `TF_FLASHNEXT_KV_PAGES_ALL` | `1` | With `TF_FLASHNEXT_KV_PAGES`, every request takes its caches from the page pool, which the engine allocates at load. With `0`, a request that runs alone takes them from the driver when it starts, outside the reserve. On a Spark shared with other services, a long prompt then fails with "the GPU had no memory left for this request's caches", or the kernel kills a service to make room. Replies stay the same (`exact.py`), and a request that does not fit yet waits for pages. |
 
 ## Settings behind the benchmarks
 
