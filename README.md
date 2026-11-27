@@ -135,6 +135,24 @@ lab's Spark keeps for other services.
 
 [docs/long-conversations.md](docs/long-conversations.md) explains how the disk tier spares the SSD, and lists its settings.
 
+## Per-request abliteration
+
+![Stock and abliterated on one DGX Spark: per-request abliteration needs 81 GiB of weights on one Spark, two separate models 162 GiB on two](docs/images/A-flash-abliteration-v46.jpg)
+
+`ABLIT=2` serves the stock model and an abliterated one from the same weights. The abliterated id,
+`Qwen3.8-Flash-Next-abliterated`, applies house-qsa refusal directions to each of its requests' rows (patches `0006` to
+`0008`); requests to the stock id are untouched.
+
+```bash
+ABLIT=2 ./start.sh restart
+```
+
+The abliterated model has had its safety refusals removed. Read the directions' model card before serving it.
+`ABLIT=1`, which grafts an abliteration overlay into the checkpoint instead, is described in
+[README-upstream.md](README-upstream.md#ablit-opt-in).
+
+Your own abliterated ids, directions files and how it works are in [docs/ablation.md](docs/ablation.md).
+
 ## Decision API
 
 A decision id answers choice, score and yes/no questions about an input. The model generates no text. It reads the
@@ -174,24 +192,6 @@ TENSORFOLD_DECISION_IDS=Qwen3.8-Flash-Next-decision=Qwen3.8-Flash-Next
 ```
 
 Request shapes, examples for both endpoints and the load settings are in [docs/decision-api.md](docs/decision-api.md).
-
-## Per-request abliteration
-
-![Stock and abliterated on one DGX Spark: per-request abliteration needs 81 GiB of weights on one Spark, two separate models 162 GiB on two](docs/images/A-flash-abliteration-v46.jpg)
-
-`ABLIT=2` serves the stock model and an abliterated one from the same weights. The abliterated id,
-`Qwen3.8-Flash-Next-abliterated`, applies house-qsa refusal directions to each of its requests' rows (patches `0006` to
-`0008`); requests to the stock id are untouched.
-
-```bash
-ABLIT=2 ./start.sh restart
-```
-
-The abliterated model has had its safety refusals removed. Read the directions' model card before serving it.
-`ABLIT=1`, which grafts an abliteration overlay into the checkpoint instead, is described in
-[README-upstream.md](README-upstream.md#ablit-opt-in).
-
-Your own abliterated ids, directions files and how it works are in [docs/ablation.md](docs/ablation.md).
 
 ## Requirements
 
